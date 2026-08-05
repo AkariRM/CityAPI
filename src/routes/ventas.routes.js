@@ -1,6 +1,7 @@
 const express = require('express');
 const { pool } = require('../db');
 const { requireAuth, requireRole } = require('../middleware/auth');
+const { obtenerConfiguracionTicket } = require('../utils/configuracionTicket');
 
 const router = express.Router();
 
@@ -129,6 +130,7 @@ router.post('/', async (req, res) => {
        WHERE s.id = $1`,
       [sucursal_id, req.usuario.sub, cliente_id || null]
     );
+    const configTicket = await obtenerConfiguracionTicket();
 
     res.status(201).json({
       id: venta.id,
@@ -139,6 +141,12 @@ router.post('/', async (req, res) => {
       metodo_pago,
       created_at: venta.created_at,
       ...contexto.rows[0],
+      nombre_negocio: configTicket.nombre_negocio,
+      mostrar_direccion: configTicket.mostrar_direccion,
+      mostrar_telefono: configTicket.mostrar_telefono,
+      mostrar_vendedor: configTicket.mostrar_vendedor,
+      mostrar_cliente: configTicket.mostrar_cliente,
+      mensaje_pie: configTicket.mensaje_pie,
       items: items.map((item) => ({
         producto_id: item.producto_id,
         nombre: nombres[item.producto_id],

@@ -504,6 +504,21 @@ CREATE TABLE notificaciones (
 CREATE INDEX idx_notificaciones_usuario ON notificaciones(usuario_id, leido);
 
 -- ============================================================================
+-- CONFIGURACION (fila unica / singleton — datos editables del ticket de venta)
+-- ============================================================================
+
+CREATE TABLE configuracion_ticket (
+  id                 uuid PRIMARY KEY DEFAULT gen_random_uuid(),
+  nombre_negocio     text NOT NULL DEFAULT 'CityPhone',
+  mostrar_direccion  boolean NOT NULL DEFAULT true,
+  mostrar_telefono   boolean NOT NULL DEFAULT true,
+  mostrar_vendedor   boolean NOT NULL DEFAULT true,
+  mostrar_cliente    boolean NOT NULL DEFAULT true,
+  mensaje_pie        text NOT NULL DEFAULT '¡Gracias por tu compra!',
+  updated_at         timestamptz NOT NULL DEFAULT now()
+);
+
+-- ============================================================================
 -- TRIGGERS updated_at
 -- ============================================================================
 
@@ -524,4 +539,6 @@ CREATE TRIGGER trg_creditos_updated_at BEFORE UPDATE ON creditos
 CREATE TRIGGER trg_reparaciones_updated_at BEFORE UPDATE ON reparaciones
   FOR EACH ROW EXECUTE FUNCTION set_updated_at();
 CREATE TRIGGER trg_publicaciones_updated_at BEFORE UPDATE ON publicaciones
+  FOR EACH ROW EXECUTE FUNCTION set_updated_at();
+CREATE TRIGGER trg_configuracion_ticket_updated_at BEFORE UPDATE ON configuracion_ticket
   FOR EACH ROW EXECUTE FUNCTION set_updated_at();
