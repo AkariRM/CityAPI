@@ -19,9 +19,11 @@ router.get('/', requireRole('admin', 'vendedor', 'tecnico', 'community_manager')
   const { rows } = await pool.query(
     `SELECT p.id, p.sku, p.nombre, p.tipo, p.marca, p.modelo, p.precio_venta, p.costo,
             p.imagen_url, p.categoria_id, c.nombre AS categoria_nombre,
-            COALESCE(i.stock_cantidad, 0) AS stock
+            p.proveedor_id, pv.nombre AS proveedor_nombre,
+            COALESCE(i.stock_cantidad, 0) AS stock, COALESCE(i.stock_minimo, 0) AS stock_minimo
      FROM productos p
      LEFT JOIN categorias c ON c.id = p.categoria_id
+     LEFT JOIN proveedores pv ON pv.id = p.proveedor_id
      LEFT JOIN inventario i ON i.producto_id = p.id AND i.sucursal_id = $1
      WHERE p.activo = true
        AND ($2::uuid IS NULL OR p.categoria_id = $2::uuid)
@@ -33,8 +35,33 @@ router.get('/', requireRole('admin', 'vendedor', 'tecnico', 'community_manager')
   res.json(rows);
 });
 
+// Bitacora de entradas/salidas/ajustes de todos los productos de una
+// sucursal. Va antes de "/:id" para que Express no lo confunda con una
+// busqueda por id.
+router.get('/movimientos', requireRole('admin', 'vendedor'), async (req, res) => {
+  const { sucursal_id, producto_id, desde, hasta } = req.query;
+  if (!sucursal_id) return res.status(400).json({ error: 'sucursal_id es requerido.' });
+
+  const { rows } = await pool.query(
+    `SELECT m.id, m.producto_id, p.nombre AS producto_nombre, m.tipo, m.cantidad, m.motivo,
+            m.referencia_tipo, m.referencia_id, m.usuario_id, u.nombre AS usuario_nombre, m.created_at
+     FROM movimientos_inventario m
+     JOIN productos p ON p.id = m.producto_id
+     LEFT JOIN usuarios u ON u.id = m.usuario_id
+     WHERE m.sucursal_id = $1
+       AND ($2::uuid IS NULL OR m.producto_id = $2::uuid)
+       AND ($3::date IS NULL OR m.created_at >= $3::date)
+       AND ($4::date IS NULL OR m.created_at < ($4::date + 1))
+     ORDER BY m.created_at DESC
+     LIMIT 200`,
+    [sucursal_id, producto_id || null, desde || null, hasta || null]
+  );
+  res.json(rows);
+});
+
 router.post('/', requireRole('admin', 'vendedor'), async (req, res) => {
-  const { sku, nombre, categoria_id, tipo, marca, modelo, precio_venta, costo, imagen_url, sucursal_id, stock_inicial } = req.body ?? {};
+  const { sku, nombre, categoria_id, tipo, marca, modelo, precio_venta, costo, imagen_url, proveedor_id, sucursal_id, stock_inicial } =
+    req.body ?? {};
   if (!nombre?.trim()) return res.status(400).json({ error: 'El nombre es requerido.' });
   if (!['nuevo', 'usado', 'accesorio', 'servicio'].includes(tipo)) {
     return res.status(400).json({ error: 'Tipo inválido.' });
@@ -48,10 +75,10 @@ router.post('/', requireRole('admin', 'vendedor'), async (req, res) => {
     await client.query('BEGIN');
 
     const producto = await client.query(
-      `INSERT INTO productos (sku, nombre, categoria_id, tipo, marca, modelo, precio_venta, costo, imagen_url)
-       VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9)
-       RETURNING id, sku, nombre, categoria_id, tipo, marca, modelo, precio_venta, costo, imagen_url, activo`,
-      [sku || null, nombre.trim(), categoria_id || null, tipo, marca || null, modelo || null, precio_venta ?? 0, costo ?? 0, imagen_url || null]
+      `INSERT INTO productos (sku, nombre, categoria_id, tipo, marca, modelo, precio_venta, costo, imagen_url, proveedor_id)
+       VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10)
+       RETURNING id, sku, nombre, categoria_id, tipo, marca, modelo, precio_venta, costo, imagen_url, proveedor_id, activo`,
+      [sku || null, nombre.trim(), categoria_id || null, tipo, marca || null, modelo || null, precio_venta ?? 0, costo ?? 0, imagen_url || null, proveedor_id || null]
     );
 
     if (sucursal_id) {
@@ -87,6 +114,7 @@ router.patch('/:id', requireRole('admin', 'vendedor'), async (req, res) => {
     costo: req.body?.costo,
     marca: req.body?.marca,
     modelo: req.body?.modelo,
+    proveedor_id: req.body?.proveedor_id,
     activo: req.body?.activo,
   };
   const sets = [];
@@ -103,10 +131,27 @@ router.patch('/:id', requireRole('admin', 'vendedor'), async (req, res) => {
   values.push(req.params.id);
   const { rows } = await pool.query(
     `UPDATE productos SET ${sets.join(', ')} WHERE id = $${i}
-     RETURNING id, sku, nombre, categoria_id, tipo, marca, modelo, precio_venta, costo, imagen_url, activo`,
+     RETURNING id, sku, nombre, categoria_id, tipo, marca, modelo, precio_venta, costo, imagen_url, proveedor_id, activo`,
     values
   );
   if (!rows[0]) return res.status(404).json({ error: 'Producto no encontrado.' });
+  res.json(rows[0]);
+});
+
+router.patch('/:id/stock-minimo', requireRole('admin', 'vendedor'), async (req, res) => {
+  const { sucursal_id, stock_minimo } = req.body ?? {};
+  if (!sucursal_id) return res.status(400).json({ error: 'sucursal_id es requerido.' });
+  if (!(Number.isInteger(stock_minimo) && stock_minimo >= 0)) {
+    return res.status(400).json({ error: 'stock_minimo debe ser un entero mayor o igual a 0.' });
+  }
+
+  const { rows } = await pool.query(
+    `INSERT INTO inventario (producto_id, sucursal_id, stock_cantidad, stock_minimo)
+     VALUES ($1, $2, 0, $3)
+     ON CONFLICT (producto_id, sucursal_id) DO UPDATE SET stock_minimo = $3, updated_at = now()
+     RETURNING stock_cantidad, stock_minimo`,
+    [req.params.id, sucursal_id, stock_minimo]
+  );
   res.json(rows[0]);
 });
 
