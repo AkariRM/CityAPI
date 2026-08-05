@@ -75,6 +75,82 @@ router.post('/', async (req, res) => {
   }
 });
 
+router.patch('/:id', async (req, res) => {
+  const fields = {
+    nombre: req.body?.nombre,
+    categoria_id: req.body?.categoria_id,
+    precio_venta: req.body?.precio_venta,
+    costo: req.body?.costo,
+    marca: req.body?.marca,
+    modelo: req.body?.modelo,
+    activo: req.body?.activo,
+  };
+  const sets = [];
+  const values = [];
+  let i = 1;
+  for (const [key, value] of Object.entries(fields)) {
+    if (value !== undefined) {
+      sets.push(`${key} = $${i++}`);
+      values.push(value);
+    }
+  }
+  if (sets.length === 0) return res.status(400).json({ error: 'No hay campos para actualizar.' });
+
+  values.push(req.params.id);
+  const { rows } = await pool.query(
+    `UPDATE productos SET ${sets.join(', ')} WHERE id = $${i}
+     RETURNING id, sku, nombre, categoria_id, tipo, marca, modelo, precio_venta, costo, imagen_url, activo`,
+    values
+  );
+  if (!rows[0]) return res.status(404).json({ error: 'Producto no encontrado.' });
+  res.json(rows[0]);
+});
+
+router.post('/:id/ajuste-stock', async (req, res) => {
+  const { sucursal_id, cantidad, motivo } = req.body ?? {};
+  if (!sucursal_id) return res.status(400).json({ error: 'sucursal_id es requerido.' });
+  const delta = Number(cantidad);
+  if (!delta) return res.status(400).json({ error: 'cantidad debe ser distinta de 0.' });
+
+  const client = await pool.connect();
+  try {
+    await client.query('BEGIN');
+
+    if (delta < 0) {
+      const { rows } = await client.query(
+        `SELECT stock_cantidad FROM inventario WHERE producto_id = $1 AND sucursal_id = $2 FOR UPDATE`,
+        [req.params.id, sucursal_id]
+      );
+      if (!rows[0] || rows[0].stock_cantidad + delta < 0) {
+        throw Object.assign(new Error('No hay stock suficiente para ese ajuste.'), { statusCode: 409 });
+      }
+    }
+
+    const result = await client.query(
+      `INSERT INTO inventario (producto_id, sucursal_id, stock_cantidad)
+       VALUES ($1, $2, GREATEST($3, 0))
+       ON CONFLICT (producto_id, sucursal_id) DO UPDATE SET stock_cantidad = inventario.stock_cantidad + $3, updated_at = now()
+       RETURNING stock_cantidad`,
+      [req.params.id, sucursal_id, delta]
+    );
+
+    await client.query(
+      `INSERT INTO movimientos_inventario (producto_id, sucursal_id, tipo, cantidad, motivo, referencia_tipo, usuario_id)
+       VALUES ($1, $2, $3, $4, $5, 'ajuste', $6)`,
+      [req.params.id, sucursal_id, delta > 0 ? 'entrada' : 'salida', Math.abs(delta), motivo || 'Ajuste manual de inventario', req.usuario.sub]
+    );
+
+    await client.query('COMMIT');
+    res.json({ stock: result.rows[0].stock_cantidad });
+  } catch (err) {
+    await client.query('ROLLBACK');
+    res.status(err.statusCode ?? 500).json({ error: err.statusCode ? err.message : 'Error interno del servidor.' });
+    if (!err.statusCode) console.error(err);
+  } finally {
+    client.release();
+  }
+});
+
 router.get('/:id/unidades', async (req, res) => {
   const { sucursal_id } = req.query;
   const { rows } = await pool.query(

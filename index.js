@@ -11,6 +11,7 @@ const clientesRoutes = require('./src/routes/clientes.routes');
 const ventasRoutes = require('./src/routes/ventas.routes');
 const cambiosRoutes = require('./src/routes/cambios.routes');
 const cortesCajaRoutes = require('./src/routes/cortes_caja.routes');
+const categoriasRoutes = require('./src/routes/categorias.routes');
 
 const app = express();
 app.use(cors());
@@ -32,6 +33,7 @@ app.use('/clientes', clientesRoutes);
 app.use('/ventas', ventasRoutes);
 app.use('/cambios', cambiosRoutes);
 app.use('/cortes-caja', cortesCajaRoutes);
+app.use('/categorias', categoriasRoutes);
 
 app.use((req, res) => {
   res.status(404).json({ error: 'Ruta no encontrada.' });

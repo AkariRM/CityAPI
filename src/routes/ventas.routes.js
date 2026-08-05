@@ -63,18 +63,20 @@ router.post('/', async (req, res) => {
   try {
     await client.query('BEGIN');
 
+    const tipos = {};
     for (const item of items) {
+      const producto = await client.query(`SELECT tipo, nombre FROM productos WHERE id = $1`, [item.producto_id]);
+      if (!producto.rows[0]) throw Object.assign(new Error('Producto no encontrado.'), { statusCode: 400 });
+      tipos[item.producto_id] = producto.rows[0].tipo;
+      if (producto.rows[0].tipo === 'servicio') continue; // los servicios no manejan inventario
+
       const { rows } = await client.query(
-        `SELECT stock_cantidad, p.nombre
-         FROM inventario i
-         JOIN productos p ON p.id = i.producto_id
-         WHERE i.producto_id = $1 AND i.sucursal_id = $2
-         FOR UPDATE`,
+        `SELECT stock_cantidad FROM inventario WHERE producto_id = $1 AND sucursal_id = $2 FOR UPDATE`,
         [item.producto_id, sucursal_id]
       );
       const stockRow = rows[0];
       if (!stockRow || stockRow.stock_cantidad < item.cantidad) {
-        throw Object.assign(new Error(`Stock insuficiente para "${stockRow?.nombre ?? item.producto_id}".`), { statusCode: 409 });
+        throw Object.assign(new Error(`Stock insuficiente para "${producto.rows[0].nombre}".`), { statusCode: 409 });
       }
     }
 
@@ -97,6 +99,8 @@ router.post('/', async (req, res) => {
          VALUES ($1, $2, $3, $4, $5, $6, $7)`,
         [venta.id, item.producto_id, item.unidad_imei_id || null, item.cantidad, item.precio_unitario, item.descuento ?? 0, itemSubtotal]
       );
+
+      if (tipos[item.producto_id] === 'servicio') continue;
 
       await client.query(
         `UPDATE inventario SET stock_cantidad = stock_cantidad - $1, updated_at = now()
