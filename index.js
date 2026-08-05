@@ -17,6 +17,10 @@ const nominasRoutes = require('./src/routes/nominas.routes');
 const gastosRoutes = require('./src/routes/gastos.routes');
 const finanzasRoutes = require('./src/routes/finanzas.routes');
 const reparacionesRoutes = require('./src/routes/reparaciones.routes');
+const publicacionesRoutes = require('./src/routes/publicaciones.routes');
+const promocionesRoutes = require('./src/routes/promociones.routes');
+const marketplaceRoutes = require('./src/routes/marketplace.routes');
+const bibliotecaRoutes = require('./src/routes/biblioteca.routes');
 
 const app = express();
 app.use(cors());
@@ -44,6 +48,10 @@ app.use('/nominas', nominasRoutes);
 app.use('/gastos', gastosRoutes);
 app.use('/finanzas', finanzasRoutes);
 app.use('/reparaciones', reparacionesRoutes);
+app.use('/publicaciones', publicacionesRoutes);
+app.use('/promociones', promocionesRoutes);
+app.use('/marketplace', marketplaceRoutes);
+app.use('/biblioteca', bibliotecaRoutes);
 
 app.use((req, res) => {
   res.status(404).json({ error: 'Ruta no encontrada.' });

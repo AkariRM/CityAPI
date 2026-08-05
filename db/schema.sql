@@ -43,7 +43,8 @@ CREATE TYPE etiqueta_foto_reparacion AS ENUM ('antes', 'despues', 'diagnostico')
 CREATE TYPE canal_notificacion_cliente AS ENUM ('whatsapp', 'sms');
 CREATE TYPE estado_notificacion_cliente AS ENUM ('pendiente', 'enviado', 'fallido');
 CREATE TYPE plataforma_publicacion AS ENUM ('instagram', 'facebook');
-CREATE TYPE estado_publicacion AS ENUM ('borrador', 'programado', 'publicado');
+CREATE TYPE estado_publicacion AS ENUM ('pendiente', 'programado', 'rechazado', 'publicado');
+CREATE TYPE tipo_contenido_publicacion AS ENUM ('reel', 'carrusel', 'historia', 'post_estatico', 'video');
 CREATE TYPE canal_conversacion AS ENUM ('whatsapp', 'instagram');
 CREATE TYPE estado_conversacion AS ENUM ('activa', 'cerrada', 'escalada');
 CREATE TYPE remitente_mensaje AS ENUM ('cliente', 'ia', 'humano');
@@ -408,9 +409,13 @@ CREATE TABLE publicaciones (
   id                uuid PRIMARY KEY DEFAULT gen_random_uuid(),
   producto_id       uuid REFERENCES productos(id),
   plataforma        plataforma_publicacion NOT NULL,
+  tipo_contenido    tipo_contenido_publicacion,
+  hook              text,
   contenido_texto   text,
+  cta               text,
+  hashtags          text[],
   imagen_url        text,
-  estado            estado_publicacion NOT NULL DEFAULT 'borrador',
+  estado            estado_publicacion NOT NULL DEFAULT 'pendiente',
   fecha_programada  timestamptz,
   creado_por        uuid REFERENCES usuarios(id),
   created_at        timestamptz NOT NULL DEFAULT now(),
@@ -433,6 +438,22 @@ CREATE TABLE promociones (
   CHECK (fecha_fin >= fecha_inicio)
 );
 CREATE INDEX idx_promociones_vigencia ON promociones(fecha_inicio, fecha_fin);
+
+-- promocion_id se agrega hasta aqui porque la tabla promociones se define
+-- despues de publicaciones.
+ALTER TABLE publicaciones ADD COLUMN promocion_id uuid REFERENCES promociones(id);
+
+CREATE TABLE marketplace_listados (
+  id            uuid PRIMARY KEY DEFAULT gen_random_uuid(),
+  producto_id   uuid NOT NULL REFERENCES productos(id),
+  precio        numeric(12,2) NOT NULL,
+  activa        boolean NOT NULL DEFAULT true,
+  vendido       boolean NOT NULL DEFAULT false,
+  creado_por    uuid REFERENCES usuarios(id),
+  created_at    timestamptz NOT NULL DEFAULT now(),
+  updated_at    timestamptz NOT NULL DEFAULT now()
+);
+CREATE INDEX idx_marketplace_listados_activa ON marketplace_listados(activa, vendido);
 
 CREATE TABLE conversaciones_ia (
   id                uuid PRIMARY KEY DEFAULT gen_random_uuid(),
@@ -539,6 +560,8 @@ CREATE TRIGGER trg_creditos_updated_at BEFORE UPDATE ON creditos
 CREATE TRIGGER trg_reparaciones_updated_at BEFORE UPDATE ON reparaciones
   FOR EACH ROW EXECUTE FUNCTION set_updated_at();
 CREATE TRIGGER trg_publicaciones_updated_at BEFORE UPDATE ON publicaciones
+  FOR EACH ROW EXECUTE FUNCTION set_updated_at();
+CREATE TRIGGER trg_marketplace_listados_updated_at BEFORE UPDATE ON marketplace_listados
   FOR EACH ROW EXECUTE FUNCTION set_updated_at();
 CREATE TRIGGER trg_configuracion_ticket_updated_at BEFORE UPDATE ON configuracion_ticket
   FOR EACH ROW EXECUTE FUNCTION set_updated_at();

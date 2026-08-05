@@ -7,9 +7,10 @@ const router = express.Router();
 router.use(requireAuth);
 
 // El listado tambien lo usa el tecnico para buscar refacciones al armar un
-// folio de reparacion; las demas rutas (alta, edicion, stock, IMEI) siguen
-// restringidas a quienes administran el catalogo.
-router.get('/', requireRole('admin', 'vendedor', 'tecnico'), async (req, res) => {
+// folio de reparacion, y el community manager para el catalogo de solo
+// lectura y para vincular equipos en Marketplace; las demas rutas (alta,
+// edicion, stock, IMEI) siguen restringidas a quienes administran el catalogo.
+router.get('/', requireRole('admin', 'vendedor', 'tecnico', 'community_manager'), async (req, res) => {
   const { sucursal_id, q, categoria_id, tipo } = req.query;
   if (!sucursal_id) return res.status(400).json({ error: 'sucursal_id es requerido.' });
 
