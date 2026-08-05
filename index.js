@@ -6,6 +6,9 @@ const cors = require('cors');
 const authRoutes = require('./src/routes/auth.routes');
 const usuariosRoutes = require('./src/routes/usuarios.routes');
 const sucursalesRoutes = require('./src/routes/sucursales.routes');
+const productosRoutes = require('./src/routes/productos.routes');
+const clientesRoutes = require('./src/routes/clientes.routes');
+const ventasRoutes = require('./src/routes/ventas.routes');
 
 const app = express();
 app.use(cors());
@@ -22,6 +25,9 @@ app.get('/', (req, res) => {
 app.use('/auth', authRoutes);
 app.use('/usuarios', usuariosRoutes);
 app.use('/sucursales', sucursalesRoutes);
+app.use('/productos', productosRoutes);
+app.use('/clientes', clientesRoutes);
+app.use('/ventas', ventasRoutes);
 
 app.use((req, res) => {
   res.status(404).json({ error: 'Ruta no encontrada.' });
