@@ -4,9 +4,12 @@ const { requireAuth, requireRole } = require('../middleware/auth');
 
 const router = express.Router();
 
-router.use(requireAuth, requireRole('admin', 'vendedor'));
+router.use(requireAuth);
 
-router.get('/', async (req, res) => {
+// El listado tambien lo usa el tecnico para buscar refacciones al armar un
+// folio de reparacion; las demas rutas (alta, edicion, stock, IMEI) siguen
+// restringidas a quienes administran el catalogo.
+router.get('/', requireRole('admin', 'vendedor', 'tecnico'), async (req, res) => {
   const { sucursal_id, q, categoria_id, tipo } = req.query;
   if (!sucursal_id) return res.status(400).json({ error: 'sucursal_id es requerido.' });
 
@@ -29,7 +32,7 @@ router.get('/', async (req, res) => {
   res.json(rows);
 });
 
-router.post('/', async (req, res) => {
+router.post('/', requireRole('admin', 'vendedor'), async (req, res) => {
   const { sku, nombre, categoria_id, tipo, marca, modelo, precio_venta, costo, imagen_url, sucursal_id, stock_inicial } = req.body ?? {};
   if (!nombre?.trim()) return res.status(400).json({ error: 'El nombre es requerido.' });
   if (!['nuevo', 'usado', 'accesorio', 'servicio'].includes(tipo)) {
@@ -75,7 +78,7 @@ router.post('/', async (req, res) => {
   }
 });
 
-router.patch('/:id', async (req, res) => {
+router.patch('/:id', requireRole('admin', 'vendedor'), async (req, res) => {
   const fields = {
     nombre: req.body?.nombre,
     categoria_id: req.body?.categoria_id,
@@ -106,7 +109,7 @@ router.patch('/:id', async (req, res) => {
   res.json(rows[0]);
 });
 
-router.post('/:id/ajuste-stock', async (req, res) => {
+router.post('/:id/ajuste-stock', requireRole('admin', 'vendedor'), async (req, res) => {
   const { sucursal_id, cantidad, motivo } = req.body ?? {};
   if (!sucursal_id) return res.status(400).json({ error: 'sucursal_id es requerido.' });
   const delta = Number(cantidad);
@@ -151,7 +154,7 @@ router.post('/:id/ajuste-stock', async (req, res) => {
   }
 });
 
-router.get('/:id/unidades', async (req, res) => {
+router.get('/:id/unidades', requireRole('admin', 'vendedor'), async (req, res) => {
   const { sucursal_id } = req.query;
   const { rows } = await pool.query(
     `SELECT id, imei, condicion, costo_adquisicion, estado, created_at
@@ -163,7 +166,7 @@ router.get('/:id/unidades', async (req, res) => {
   res.json(rows);
 });
 
-router.post('/:id/unidades', async (req, res) => {
+router.post('/:id/unidades', requireRole('admin', 'vendedor'), async (req, res) => {
   const { sucursal_id, imei, condicion, costo_adquisicion } = req.body ?? {};
   if (!sucursal_id) return res.status(400).json({ error: 'sucursal_id es requerido.' });
   if (!imei?.trim()) return res.status(400).json({ error: 'El IMEI es requerido.' });
