@@ -16,6 +16,7 @@ const configuracionRoutes = require('./src/routes/configuracion.routes');
 const nominasRoutes = require('./src/routes/nominas.routes');
 const gastosRoutes = require('./src/routes/gastos.routes');
 const finanzasRoutes = require('./src/routes/finanzas.routes');
+const reparacionesRoutes = require('./src/routes/reparaciones.routes');
 
 const app = express();
 app.use(cors());
@@ -42,6 +43,7 @@ app.use('/configuracion-ticket', configuracionRoutes);
 app.use('/nominas', nominasRoutes);
 app.use('/gastos', gastosRoutes);
 app.use('/finanzas', finanzasRoutes);
+app.use('/reparaciones', reparacionesRoutes);
 
 app.use((req, res) => {
   res.status(404).json({ error: 'Ruta no encontrada.' });
