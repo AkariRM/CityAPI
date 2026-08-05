@@ -64,10 +64,12 @@ router.post('/', async (req, res) => {
     await client.query('BEGIN');
 
     const tipos = {};
+    const nombres = {};
     for (const item of items) {
       const producto = await client.query(`SELECT tipo, nombre FROM productos WHERE id = $1`, [item.producto_id]);
       if (!producto.rows[0]) throw Object.assign(new Error('Producto no encontrado.'), { statusCode: 400 });
       tipos[item.producto_id] = producto.rows[0].tipo;
+      nombres[item.producto_id] = producto.rows[0].nombre;
       if (producto.rows[0].tipo === 'servicio') continue; // los servicios no manejan inventario
 
       const { rows } = await client.query(
@@ -116,7 +118,35 @@ router.post('/', async (req, res) => {
     }
 
     await client.query('COMMIT');
-    res.status(201).json({ id: venta.id, folio: venta.folio, subtotal, descuento, total, created_at: venta.created_at });
+
+    const contexto = await pool.query(
+      `SELECT s.nombre AS sucursal_nombre, s.direccion AS sucursal_direccion, s.telefono AS sucursal_telefono,
+              u.nombre AS vendedor_nombre,
+              c.nombre AS cliente_nombre
+       FROM sucursales s
+       LEFT JOIN usuarios u ON u.id = $2
+       LEFT JOIN clientes c ON c.id = $3
+       WHERE s.id = $1`,
+      [sucursal_id, req.usuario.sub, cliente_id || null]
+    );
+
+    res.status(201).json({
+      id: venta.id,
+      folio: venta.folio,
+      subtotal,
+      descuento,
+      total,
+      metodo_pago,
+      created_at: venta.created_at,
+      ...contexto.rows[0],
+      items: items.map((item) => ({
+        producto_id: item.producto_id,
+        nombre: nombres[item.producto_id],
+        cantidad: item.cantidad,
+        precio_unitario: item.precio_unitario,
+        subtotal: item.cantidad * item.precio_unitario - (item.descuento ?? 0),
+      })),
+    });
   } catch (err) {
     await client.query('ROLLBACK');
     res.status(err.statusCode ?? 500).json({ error: err.statusCode ? err.message : 'Error interno del servidor.' });
