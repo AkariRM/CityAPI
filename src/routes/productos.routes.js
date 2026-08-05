@@ -30,19 +30,49 @@ router.get('/', async (req, res) => {
 });
 
 router.post('/', async (req, res) => {
-  const { sku, nombre, categoria_id, tipo, marca, modelo, precio_venta, costo, imagen_url } = req.body ?? {};
+  const { sku, nombre, categoria_id, tipo, marca, modelo, precio_venta, costo, imagen_url, sucursal_id, stock_inicial } = req.body ?? {};
   if (!nombre?.trim()) return res.status(400).json({ error: 'El nombre es requerido.' });
   if (!['nuevo', 'usado', 'accesorio', 'servicio'].includes(tipo)) {
     return res.status(400).json({ error: 'Tipo inválido.' });
   }
 
-  const { rows } = await pool.query(
-    `INSERT INTO productos (sku, nombre, categoria_id, tipo, marca, modelo, precio_venta, costo, imagen_url)
-     VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9)
-     RETURNING id, sku, nombre, categoria_id, tipo, marca, modelo, precio_venta, costo, imagen_url, activo`,
-    [sku || null, nombre.trim(), categoria_id || null, tipo, marca || null, modelo || null, precio_venta ?? 0, costo ?? 0, imagen_url || null]
-  );
-  res.status(201).json(rows[0]);
+  const cantidad = Number(stock_inicial) || 0;
+  if (sucursal_id && cantidad < 0) return res.status(400).json({ error: 'La cantidad inicial no puede ser negativa.' });
+
+  const client = await pool.connect();
+  try {
+    await client.query('BEGIN');
+
+    const producto = await client.query(
+      `INSERT INTO productos (sku, nombre, categoria_id, tipo, marca, modelo, precio_venta, costo, imagen_url)
+       VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9)
+       RETURNING id, sku, nombre, categoria_id, tipo, marca, modelo, precio_venta, costo, imagen_url, activo`,
+      [sku || null, nombre.trim(), categoria_id || null, tipo, marca || null, modelo || null, precio_venta ?? 0, costo ?? 0, imagen_url || null]
+    );
+
+    if (sucursal_id) {
+      await client.query(
+        `INSERT INTO inventario (producto_id, sucursal_id, stock_cantidad) VALUES ($1, $2, $3)`,
+        [producto.rows[0].id, sucursal_id, cantidad]
+      );
+      if (cantidad > 0) {
+        await client.query(
+          `INSERT INTO movimientos_inventario (producto_id, sucursal_id, tipo, cantidad, motivo, referencia_tipo, referencia_id, usuario_id)
+           VALUES ($1, $2, 'entrada', $3, 'Alta de producto con stock inicial', 'producto', $1, $4)`,
+          [producto.rows[0].id, sucursal_id, cantidad, req.usuario.sub]
+        );
+      }
+    }
+
+    await client.query('COMMIT');
+    res.status(201).json({ ...producto.rows[0], stock: cantidad });
+  } catch (err) {
+    await client.query('ROLLBACK');
+    console.error(err);
+    res.status(500).json({ error: 'Error interno del servidor.' });
+  } finally {
+    client.release();
+  }
 });
 
 router.get('/:id/unidades', async (req, res) => {
