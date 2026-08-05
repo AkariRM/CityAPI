@@ -8,6 +8,45 @@ router.use(requireAuth, requireRole('admin', 'vendedor'));
 
 const METODOS_VALIDOS = ['efectivo', 'tarjeta'];
 
+router.get('/', async (req, res) => {
+  const { folio } = req.query;
+  if (!folio) return res.status(400).json({ error: 'folio es requerido para buscar.' });
+
+  const { rows } = await pool.query(
+    `SELECT v.id, v.folio, v.sucursal_id, v.subtotal, v.descuento, v.total, v.metodo_pago, v.estado, v.created_at,
+            c.nombre AS cliente_nombre
+     FROM ventas v
+     LEFT JOIN clientes c ON c.id = v.cliente_id
+     WHERE v.folio ILIKE '%' || $1 || '%'
+     ORDER BY v.created_at DESC
+     LIMIT 10`,
+    [folio]
+  );
+  res.json(rows);
+});
+
+router.get('/:id', async (req, res) => {
+  const ventaResult = await pool.query(
+    `SELECT v.id, v.folio, v.sucursal_id, v.subtotal, v.descuento, v.total, v.metodo_pago, v.estado, v.created_at,
+            c.nombre AS cliente_nombre
+     FROM ventas v LEFT JOIN clientes c ON c.id = v.cliente_id
+     WHERE v.id = $1`,
+    [req.params.id]
+  );
+  const venta = ventaResult.rows[0];
+  if (!venta) return res.status(404).json({ error: 'Venta no encontrada.' });
+
+  const items = await pool.query(
+    `SELECT vi.id, vi.producto_id, p.nombre AS producto_nombre, vi.unidad_imei_id, vi.cantidad, vi.precio_unitario, vi.subtotal
+     FROM venta_items vi JOIN productos p ON p.id = vi.producto_id
+     WHERE vi.venta_id = $1
+     ORDER BY p.nombre`,
+    [req.params.id]
+  );
+
+  res.json({ ...venta, items: items.rows });
+});
+
 router.post('/', async (req, res) => {
   const { sucursal_id, cliente_id, metodo_pago, items } = req.body ?? {};
 
