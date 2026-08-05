@@ -1,6 +1,14 @@
+require('dotenv').config();
+
 const express = require('express');
+const cors = require('cors');
+
+const authRoutes = require('./src/routes/auth.routes');
+const usuariosRoutes = require('./src/routes/usuarios.routes');
+const sucursalesRoutes = require('./src/routes/sucursales.routes');
 
 const app = express();
+app.use(cors());
 app.use(express.json());
 
 app.get('/health', (req, res) => {
@@ -9,6 +17,20 @@ app.get('/health', (req, res) => {
 
 app.get('/', (req, res) => {
   res.json({ name: 'CityPhone SGI API' });
+});
+
+app.use('/auth', authRoutes);
+app.use('/usuarios', usuariosRoutes);
+app.use('/sucursales', sucursalesRoutes);
+
+app.use((req, res) => {
+  res.status(404).json({ error: 'Ruta no encontrada.' });
+});
+
+// eslint-disable-next-line no-unused-vars
+app.use((err, req, res, next) => {
+  console.error(err);
+  res.status(500).json({ error: 'Error interno del servidor.' });
 });
 
 const port = process.env.PORT || 3000;
