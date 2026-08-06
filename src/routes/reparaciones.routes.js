@@ -1,6 +1,7 @@
 const express = require('express');
 const { pool } = require('../db');
 const { requireAuth, requireRole } = require('../middleware/auth');
+const { inicioDiaUTC, finDiaUTCExclusivo } = require('../utils/fechas');
 
 const router = express.Router();
 
@@ -18,10 +19,10 @@ router.get('/refacciones/reporte', async (req, res) => {
      FROM reparacion_refacciones rr
      JOIN reparaciones r ON r.id = rr.reparacion_id
      JOIN productos p ON p.id = rr.producto_id
-     WHERE ($1::date IS NULL OR r.created_at >= $1::date)
-       AND ($2::date IS NULL OR r.created_at < ($2::date + 1))
+     WHERE ($1::timestamptz IS NULL OR r.created_at >= $1::timestamptz)
+       AND ($2::timestamptz IS NULL OR r.created_at < $2::timestamptz)
      ORDER BY r.created_at DESC`,
-    [desde || null, hasta || null]
+    [desde ? inicioDiaUTC(desde) : null, hasta ? finDiaUTCExclusivo(hasta) : null]
   );
   res.json(rows);
 });

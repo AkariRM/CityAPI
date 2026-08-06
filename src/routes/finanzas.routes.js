@@ -1,6 +1,7 @@
 const express = require('express');
 const { pool } = require('../db');
 const { requireAuth, requireRole } = require('../middleware/auth');
+const { inicioDiaUTC, finDiaUTCExclusivo } = require('../utils/fechas');
 
 const router = express.Router();
 
@@ -9,12 +10,14 @@ router.use(requireAuth, requireRole('admin'));
 router.get('/resumen', async (req, res) => {
   const { desde, hasta } = req.query;
   if (!desde || !hasta) return res.status(400).json({ error: 'desde y hasta son requeridos (YYYY-MM-DD).' });
+  const desdeUTC = inicioDiaUTC(desde);
+  const hastaUTC = finDiaUTCExclusivo(hasta);
 
   const ingresos = await pool.query(
     `SELECT COALESCE(sum(total), 0) AS valor, count(*)::int AS cantidad
      FROM ventas
-     WHERE estado = 'completada' AND created_at >= $1::date AND created_at < ($2::date + 1)`,
-    [desde, hasta]
+     WHERE estado = 'completada' AND created_at >= $1::timestamptz AND created_at < $2::timestamptz`,
+    [desdeUTC, hastaUTC]
   );
 
   const costoVentas = await pool.query(
@@ -22,8 +25,8 @@ router.get('/resumen', async (req, res) => {
      FROM venta_items vi
      JOIN ventas v ON v.id = vi.venta_id
      JOIN productos p ON p.id = vi.producto_id
-     WHERE v.estado = 'completada' AND v.created_at >= $1::date AND v.created_at < ($2::date + 1)`,
-    [desde, hasta]
+     WHERE v.estado = 'completada' AND v.created_at >= $1::timestamptz AND v.created_at < $2::timestamptz`,
+    [desdeUTC, hastaUTC]
   );
 
   const gastos = await pool.query(

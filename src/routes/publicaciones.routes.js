@@ -1,6 +1,7 @@
 const express = require('express');
 const { pool } = require('../db');
 const { requireAuth, requireRole } = require('../middleware/auth');
+const { inicioDiaUTC, finDiaUTCExclusivo } = require('../utils/fechas');
 
 const router = express.Router();
 router.use(requireAuth, requireRole('admin', 'community_manager'));
@@ -22,9 +23,9 @@ router.get('/', async (req, res) => {
      WHERE ($1::text IS NULL OR p.estado::text = $1)
        AND ($2::text IS NULL OR p.plataforma::text = $2)
        AND ($3::timestamptz IS NULL OR p.fecha_programada >= $3::timestamptz)
-       AND ($4::timestamptz IS NULL OR p.fecha_programada < ($4::timestamptz + interval '1 day'))
+       AND ($4::timestamptz IS NULL OR p.fecha_programada < $4::timestamptz)
      ORDER BY p.fecha_programada NULLS LAST, p.created_at DESC`,
-    [estado || null, plataforma || null, desde || null, hasta || null]
+    [estado || null, plataforma || null, desde ? inicioDiaUTC(desde) : null, hasta ? finDiaUTCExclusivo(hasta) : null]
   );
   res.json(rows);
 });

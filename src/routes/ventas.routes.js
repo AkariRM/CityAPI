@@ -2,12 +2,31 @@ const express = require('express');
 const { pool } = require('../db');
 const { requireAuth, requireRole } = require('../middleware/auth');
 const { obtenerConfiguracionTicket } = require('../utils/configuracionTicket');
+const { inicioDiaUTC, finDiaUTCExclusivo } = require('../utils/fechas');
 
 const router = express.Router();
 
 router.use(requireAuth, requireRole('admin', 'vendedor'));
 
 const METODOS_VALIDOS = ['efectivo', 'tarjeta'];
+
+// Total de ventas de un dia, sin costos ni utilidad — a diferencia de
+// /finanzas/resumen (solo admin), esto lo puede ver tambien el vendedor
+// para su propio resumen del dia en el dashboard de mostrador.
+router.get('/resumen-dia', async (req, res) => {
+  const { sucursal_id, fecha } = req.query;
+  if (!sucursal_id) return res.status(400).json({ error: 'sucursal_id es requerido.' });
+  const dia = fecha || new Date().toISOString().slice(0, 10);
+
+  const { rows } = await pool.query(
+    `SELECT COALESCE(sum(total), 0) AS total, count(*)::int AS cantidad
+     FROM ventas
+     WHERE sucursal_id = $1 AND estado = 'completada'
+       AND created_at >= $2::timestamptz AND created_at < $3::timestamptz`,
+    [sucursal_id, inicioDiaUTC(dia), finDiaUTCExclusivo(dia)]
+  );
+  res.json({ fecha: dia, total: Number(rows[0].total), cantidad: rows[0].cantidad });
+});
 
 router.get('/', async (req, res) => {
   const { folio } = req.query;

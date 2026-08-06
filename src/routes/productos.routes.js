@@ -1,6 +1,7 @@
 const express = require('express');
 const { pool } = require('../db');
 const { requireAuth, requireRole } = require('../middleware/auth');
+const { inicioDiaUTC, finDiaUTCExclusivo } = require('../utils/fechas');
 
 const router = express.Router();
 
@@ -50,11 +51,11 @@ router.get('/movimientos', requireRole('admin', 'vendedor'), async (req, res) =>
      LEFT JOIN usuarios u ON u.id = m.usuario_id
      WHERE m.sucursal_id = $1
        AND ($2::uuid IS NULL OR m.producto_id = $2::uuid)
-       AND ($3::date IS NULL OR m.created_at >= $3::date)
-       AND ($4::date IS NULL OR m.created_at < ($4::date + 1))
+       AND ($3::timestamptz IS NULL OR m.created_at >= $3::timestamptz)
+       AND ($4::timestamptz IS NULL OR m.created_at < $4::timestamptz)
      ORDER BY m.created_at DESC
      LIMIT 200`,
-    [sucursal_id, producto_id || null, desde || null, hasta || null]
+    [sucursal_id, producto_id || null, desde ? inicioDiaUTC(desde) : null, hasta ? finDiaUTCExclusivo(hasta) : null]
   );
   res.json(rows);
 });
