@@ -28,9 +28,25 @@ router.get('/resumen-dia', async (req, res) => {
   res.json({ fecha: dia, total: Number(rows[0].total), cantidad: rows[0].cantidad });
 });
 
+// Sin folio: navegar las ventas de los ultimos 7 dias de una sucursal (usado
+// por Cambios/devoluciones para elegir la venta sin teclear el folio).
 router.get('/', async (req, res) => {
-  const { folio } = req.query;
-  if (!folio) return res.status(400).json({ error: 'folio es requerido para buscar.' });
+  const { folio, sucursal_id } = req.query;
+
+  if (!folio) {
+    if (!sucursal_id) return res.status(400).json({ error: 'folio o sucursal_id son requeridos.' });
+    const { rows } = await pool.query(
+      `SELECT v.id, v.folio, v.sucursal_id, v.subtotal, v.descuento, v.total, v.metodo_pago, v.estado, v.created_at,
+              c.nombre AS cliente_nombre
+       FROM ventas v
+       LEFT JOIN clientes c ON c.id = v.cliente_id
+       WHERE v.sucursal_id = $1 AND v.estado = 'completada' AND v.created_at >= now() - interval '7 days'
+       ORDER BY v.created_at DESC
+       LIMIT 50`,
+      [sucursal_id]
+    );
+    return res.json(rows);
+  }
 
   const { rows } = await pool.query(
     `SELECT v.id, v.folio, v.sucursal_id, v.subtotal, v.descuento, v.total, v.metodo_pago, v.estado, v.created_at,

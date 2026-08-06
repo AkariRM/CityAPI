@@ -9,10 +9,21 @@ router.use(requireAuth, requireRole('admin', 'vendedor'));
 router.get('/', async (req, res) => {
   const { q } = req.query;
   const { rows } = await pool.query(
-    `SELECT id, nombre, telefono, email, direccion, notas, created_at
-     FROM clientes
-     WHERE ($1::text IS NULL OR nombre ILIKE '%' || $1 || '%' OR telefono ILIKE '%' || $1 || '%')
-     ORDER BY nombre
+    `SELECT c.id, c.nombre, c.telefono, c.email, c.direccion, c.notas, c.created_at,
+            COALESCE(v.numero_compras, 0) AS numero_compras,
+            COALESCE(r.numero_reparaciones, 0) AS numero_reparaciones,
+            GREATEST(v.ultima_compra, r.ultima_reparacion) AS ultima_visita
+     FROM clientes c
+     LEFT JOIN LATERAL (
+       SELECT count(*)::int AS numero_compras, max(created_at) AS ultima_compra
+       FROM ventas WHERE cliente_id = c.id AND estado = 'completada'
+     ) v ON true
+     LEFT JOIN LATERAL (
+       SELECT count(*)::int AS numero_reparaciones, max(created_at) AS ultima_reparacion
+       FROM reparaciones WHERE cliente_id = c.id
+     ) r ON true
+     WHERE ($1::text IS NULL OR c.nombre ILIKE '%' || $1 || '%' OR c.telefono ILIKE '%' || $1 || '%')
+     ORDER BY c.nombre
      LIMIT 300`,
     [q || null]
   );

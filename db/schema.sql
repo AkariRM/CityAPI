@@ -48,6 +48,9 @@ CREATE TYPE tipo_contenido_publicacion AS ENUM ('reel', 'carrusel', 'historia', 
 CREATE TYPE canal_conversacion AS ENUM ('whatsapp', 'instagram');
 CREATE TYPE estado_conversacion AS ENUM ('activa', 'cerrada', 'escalada');
 CREATE TYPE remitente_mensaje AS ENUM ('cliente', 'ia', 'humano');
+CREATE TYPE grado_cambio_equipo AS ENUM ('A', 'B', 'C', 'D');
+CREATE TYPE estado_cambio_equipo AS ENUM ('evaluando', 'aceptado', 'rechazado', 'completado');
+CREATE TYPE estado_orden_compra AS ENUM ('pendiente', 'recibida');
 
 -- ============================================================================
 -- NUCLEO: sucursales, usuarios, sesiones, auditoria
@@ -210,6 +213,20 @@ CREATE TABLE movimientos_inventario (
 CREATE INDEX idx_movimientos_producto ON movimientos_inventario(producto_id, sucursal_id);
 CREATE INDEX idx_movimientos_referencia ON movimientos_inventario(referencia_tipo, referencia_id);
 
+CREATE TABLE ordenes_compra (
+  id            uuid PRIMARY KEY DEFAULT gen_random_uuid(),
+  proveedor_id  uuid NOT NULL REFERENCES proveedores(id),
+  producto_id   uuid NOT NULL REFERENCES productos(id),
+  sucursal_id   uuid NOT NULL REFERENCES sucursales(id),
+  cantidad      integer NOT NULL CHECK (cantidad > 0),
+  estado        estado_orden_compra NOT NULL DEFAULT 'pendiente',
+  creado_por    uuid REFERENCES usuarios(id),
+  recibido_at   timestamptz,
+  created_at    timestamptz NOT NULL DEFAULT now()
+);
+CREATE INDEX idx_ordenes_compra_proveedor ON ordenes_compra(proveedor_id);
+CREATE INDEX idx_ordenes_compra_estado ON ordenes_compra(estado);
+
 CREATE TABLE precios_especiales (
   id           uuid PRIMARY KEY DEFAULT gen_random_uuid(),
   producto_id  uuid NOT NULL REFERENCES productos(id),
@@ -270,6 +287,30 @@ CREATE TABLE cambios (
   created_at            timestamptz NOT NULL DEFAULT now()
 );
 CREATE INDEX idx_cambios_venta ON cambios(venta_original_id);
+
+-- Cambio de equipo por dinero (trade-in): evaluacion de un equipo usado que
+-- el cliente entrega a cambio de credito, distinto de "cambios" (devolucion
+-- o cambio de un producto ya comprado en tienda).
+CREATE TABLE cambios_equipo (
+  id                uuid PRIMARY KEY DEFAULT gen_random_uuid(),
+  sucursal_id       uuid NOT NULL REFERENCES sucursales(id),
+  cliente_nombre    text NOT NULL,
+  equipo_modelo     text NOT NULL,
+  grado             grado_cambio_equipo NOT NULL,
+  bateria_pct       integer,
+  pantalla_ok       boolean NOT NULL DEFAULT true,
+  cuerpo_ok         boolean NOT NULL DEFAULT true,
+  camaras_ok        boolean NOT NULL DEFAULT true,
+  botones_ok        boolean NOT NULL DEFAULT true,
+  valor_referencia  numeric(12,2) NOT NULL DEFAULT 0,
+  valor_ofrecido    numeric(12,2) NOT NULL DEFAULT 0,
+  estado            estado_cambio_equipo NOT NULL DEFAULT 'evaluando',
+  producto_id       uuid REFERENCES productos(id),
+  usuario_id        uuid REFERENCES usuarios(id),
+  created_at        timestamptz NOT NULL DEFAULT now(),
+  updated_at        timestamptz NOT NULL DEFAULT now()
+);
+CREATE INDEX idx_cambios_equipo_sucursal ON cambios_equipo(sucursal_id, estado);
 
 CREATE TABLE cortes_caja (
   id              uuid PRIMARY KEY DEFAULT gen_random_uuid(),
@@ -574,6 +615,8 @@ CREATE TRIGGER trg_unidades_imei_updated_at BEFORE UPDATE ON unidades_imei
 CREATE TRIGGER trg_creditos_updated_at BEFORE UPDATE ON creditos
   FOR EACH ROW EXECUTE FUNCTION set_updated_at();
 CREATE TRIGGER trg_reparaciones_updated_at BEFORE UPDATE ON reparaciones
+  FOR EACH ROW EXECUTE FUNCTION set_updated_at();
+CREATE TRIGGER trg_cambios_equipo_updated_at BEFORE UPDATE ON cambios_equipo
   FOR EACH ROW EXECUTE FUNCTION set_updated_at();
 CREATE TRIGGER trg_publicaciones_updated_at BEFORE UPDATE ON publicaciones
   FOR EACH ROW EXECUTE FUNCTION set_updated_at();

@@ -157,10 +157,13 @@ router.patch('/:id/stock-minimo', requireRole('admin', 'vendedor'), async (req, 
 });
 
 router.post('/:id/ajuste-stock', requireRole('admin', 'vendedor'), async (req, res) => {
-  const { sucursal_id, cantidad, motivo } = req.body ?? {};
+  const { sucursal_id, cantidad, motivo, tipo } = req.body ?? {};
   if (!sucursal_id) return res.status(400).json({ error: 'sucursal_id es requerido.' });
   const delta = Number(cantidad);
   if (!delta) return res.status(400).json({ error: 'cantidad debe ser distinta de 0.' });
+  if (tipo !== undefined && !['entrada', 'salida', 'ajuste'].includes(tipo)) {
+    return res.status(400).json({ error: 'tipo inválido.' });
+  }
 
   const client = await pool.connect();
   try {
@@ -187,7 +190,7 @@ router.post('/:id/ajuste-stock', requireRole('admin', 'vendedor'), async (req, r
     await client.query(
       `INSERT INTO movimientos_inventario (producto_id, sucursal_id, tipo, cantidad, motivo, referencia_tipo, usuario_id)
        VALUES ($1, $2, $3, $4, $5, 'ajuste', $6)`,
-      [req.params.id, sucursal_id, delta > 0 ? 'entrada' : 'salida', Math.abs(delta), motivo || 'Ajuste manual de inventario', req.usuario.sub]
+      [req.params.id, sucursal_id, tipo || (delta > 0 ? 'entrada' : 'salida'), Math.abs(delta), motivo || 'Ajuste manual de inventario', req.usuario.sub]
     );
 
     await client.query('COMMIT');
