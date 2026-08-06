@@ -5,14 +5,15 @@ const { requireAuth, requireRole } = require('../middleware/auth');
 const router = express.Router();
 router.use(requireAuth, requireRole('admin', 'vendedor'));
 
-const GRADOS_VALIDOS = ['A', 'B', 'C', 'D'];
+const GRADOS_VALIDOS = ['A', 'B', 'C', 'D', 'otro'];
 
 router.get('/', async (req, res) => {
   const { sucursal_id, estado } = req.query;
   if (!sucursal_id) return res.status(400).json({ error: 'sucursal_id es requerido.' });
 
   const { rows } = await pool.query(
-    `SELECT id, cliente_nombre, equipo_modelo, grado, bateria_pct, pantalla_ok, cuerpo_ok, camaras_ok, botones_ok,
+    `SELECT id, cliente_id, cliente_nombre, equipo_modelo, grado, grado_detalle, bateria_pct,
+            pantalla_ok, cuerpo_ok, camaras_ok, botones_ok,
             valor_referencia, valor_ofrecido, estado, producto_id, created_at, updated_at
      FROM cambios_equipo
      WHERE sucursal_id = $1 AND ($2::text IS NULL OR estado::text = $2)
@@ -25,9 +26,11 @@ router.get('/', async (req, res) => {
 router.post('/', async (req, res) => {
   const {
     sucursal_id,
+    cliente_id,
     cliente_nombre,
     equipo_modelo,
     grado,
+    grado_detalle,
     bateria_pct,
     pantalla_ok,
     cuerpo_ok,
@@ -41,19 +44,24 @@ router.post('/', async (req, res) => {
   if (!cliente_nombre?.trim()) return res.status(400).json({ error: 'El nombre del cliente es requerido.' });
   if (!equipo_modelo?.trim()) return res.status(400).json({ error: 'El equipo ofrecido es requerido.' });
   if (!GRADOS_VALIDOS.includes(grado)) return res.status(400).json({ error: 'Grado inválido.' });
+  if (grado === 'otro' && !grado_detalle?.trim()) {
+    return res.status(400).json({ error: 'Describe la condición cuando eliges "Otro".' });
+  }
 
   const { rows } = await pool.query(
     `INSERT INTO cambios_equipo
-       (sucursal_id, cliente_nombre, equipo_modelo, grado, bateria_pct, pantalla_ok, cuerpo_ok, camaras_ok, botones_ok,
-        valor_referencia, valor_ofrecido, usuario_id)
-     VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12)
-     RETURNING id, cliente_nombre, equipo_modelo, grado, bateria_pct, pantalla_ok, cuerpo_ok, camaras_ok, botones_ok,
-               valor_referencia, valor_ofrecido, estado, created_at`,
+       (sucursal_id, cliente_id, cliente_nombre, equipo_modelo, grado, grado_detalle, bateria_pct,
+        pantalla_ok, cuerpo_ok, camaras_ok, botones_ok, valor_referencia, valor_ofrecido, usuario_id)
+     VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14)
+     RETURNING id, cliente_id, cliente_nombre, equipo_modelo, grado, grado_detalle, bateria_pct,
+               pantalla_ok, cuerpo_ok, camaras_ok, botones_ok, valor_referencia, valor_ofrecido, estado, created_at`,
     [
       sucursal_id,
+      cliente_id || null,
       cliente_nombre.trim(),
       equipo_modelo.trim(),
       grado,
+      grado === 'otro' ? grado_detalle.trim() : null,
       bateria_pct ?? null,
       pantalla_ok ?? true,
       cuerpo_ok ?? true,

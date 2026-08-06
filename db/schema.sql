@@ -48,7 +48,7 @@ CREATE TYPE tipo_contenido_publicacion AS ENUM ('reel', 'carrusel', 'historia', 
 CREATE TYPE canal_conversacion AS ENUM ('whatsapp', 'instagram');
 CREATE TYPE estado_conversacion AS ENUM ('activa', 'cerrada', 'escalada');
 CREATE TYPE remitente_mensaje AS ENUM ('cliente', 'ia', 'humano');
-CREATE TYPE grado_cambio_equipo AS ENUM ('A', 'B', 'C', 'D');
+CREATE TYPE grado_cambio_equipo AS ENUM ('A', 'B', 'C', 'D', 'otro');
 CREATE TYPE estado_cambio_equipo AS ENUM ('evaluando', 'aceptado', 'rechazado', 'completado');
 CREATE TYPE estado_orden_compra AS ENUM ('pendiente', 'recibida');
 
@@ -294,9 +294,11 @@ CREATE INDEX idx_cambios_venta ON cambios(venta_original_id);
 CREATE TABLE cambios_equipo (
   id                uuid PRIMARY KEY DEFAULT gen_random_uuid(),
   sucursal_id       uuid NOT NULL REFERENCES sucursales(id),
+  cliente_id        uuid REFERENCES clientes(id),
   cliente_nombre    text NOT NULL,
   equipo_modelo     text NOT NULL,
   grado             grado_cambio_equipo NOT NULL,
+  grado_detalle     text,
   bateria_pct       integer,
   pantalla_ok       boolean NOT NULL DEFAULT true,
   cuerpo_ok         boolean NOT NULL DEFAULT true,
