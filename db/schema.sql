@@ -525,6 +525,22 @@ CREATE TABLE notificaciones (
 CREATE INDEX idx_notificaciones_usuario ON notificaciones(usuario_id, leido);
 
 -- ============================================================================
+-- FILA DE ESPERA (mostrador)
+-- ============================================================================
+
+CREATE TABLE fila_espera (
+  id            uuid PRIMARY KEY DEFAULT gen_random_uuid(),
+  sucursal_id   uuid NOT NULL REFERENCES sucursales(id),
+  nombre        text NOT NULL,
+  motivo        text,
+  atendido      boolean NOT NULL DEFAULT false,
+  atendido_por  uuid REFERENCES usuarios(id),
+  atendido_at   timestamptz,
+  created_at    timestamptz NOT NULL DEFAULT now()
+);
+CREATE INDEX idx_fila_espera_sucursal ON fila_espera(sucursal_id, atendido);
+
+-- ============================================================================
 -- CONFIGURACION (fila unica / singleton — datos editables del ticket de venta)
 -- ============================================================================
 

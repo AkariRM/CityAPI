@@ -22,6 +22,7 @@ const promocionesRoutes = require('./src/routes/promociones.routes');
 const marketplaceRoutes = require('./src/routes/marketplace.routes');
 const bibliotecaRoutes = require('./src/routes/biblioteca.routes');
 const proveedoresRoutes = require('./src/routes/proveedores.routes');
+const filaEsperaRoutes = require('./src/routes/filaEspera.routes');
 
 const app = express();
 app.use(cors());
@@ -54,6 +55,7 @@ app.use('/promociones', promocionesRoutes);
 app.use('/marketplace', marketplaceRoutes);
 app.use('/biblioteca', bibliotecaRoutes);
 app.use('/proveedores', proveedoresRoutes);
+app.use('/fila-espera', filaEsperaRoutes);
 
 app.use((req, res) => {
   res.status(404).json({ error: 'Ruta no encontrada.' });
