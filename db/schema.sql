@@ -51,6 +51,7 @@ CREATE TYPE remitente_mensaje AS ENUM ('cliente', 'ia', 'humano');
 CREATE TYPE grado_cambio_equipo AS ENUM ('A', 'B', 'C', 'D', 'otro');
 CREATE TYPE estado_cambio_equipo AS ENUM ('evaluando', 'aceptado', 'rechazado', 'completado');
 CREATE TYPE estado_orden_compra AS ENUM ('pendiente', 'recibida');
+CREATE TYPE estado_comentario AS ENUM ('pendiente', 'respondido', 'descartado');
 
 -- ============================================================================
 -- NUCLEO: sucursales, usuarios, sesiones, auditoria
@@ -497,6 +498,20 @@ CREATE TABLE marketplace_listados (
   updated_at    timestamptz NOT NULL DEFAULT now()
 );
 CREATE INDEX idx_marketplace_listados_activa ON marketplace_listados(activa, vendido);
+
+CREATE TABLE comentarios_redes (
+  id              uuid PRIMARY KEY DEFAULT gen_random_uuid(),
+  plataforma      plataforma_publicacion NOT NULL,
+  publicacion_id  uuid REFERENCES publicaciones(id),
+  autor_nombre    text NOT NULL,
+  contenido       text NOT NULL,
+  estado          estado_comentario NOT NULL DEFAULT 'pendiente',
+  respuesta       text,
+  respondido_por  uuid REFERENCES usuarios(id),
+  respondido_at   timestamptz,
+  created_at      timestamptz NOT NULL DEFAULT now()
+);
+CREATE INDEX idx_comentarios_redes_estado ON comentarios_redes(estado);
 
 CREATE TABLE conversaciones_ia (
   id                uuid PRIMARY KEY DEFAULT gen_random_uuid(),

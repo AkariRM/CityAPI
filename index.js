@@ -25,6 +25,9 @@ const proveedoresRoutes = require('./src/routes/proveedores.routes');
 const filaEsperaRoutes = require('./src/routes/filaEspera.routes');
 const cambiosEquipoRoutes = require('./src/routes/cambiosEquipo.routes');
 const ordenesCompraRoutes = require('./src/routes/ordenesCompra.routes');
+const reportesRoutes = require('./src/routes/reportes.routes');
+const conversacionesRoutes = require('./src/routes/conversaciones.routes');
+const comentariosRoutes = require('./src/routes/comentarios.routes');
 
 const app = express();
 app.use(cors());
@@ -60,6 +63,9 @@ app.use('/proveedores', proveedoresRoutes);
 app.use('/fila-espera', filaEsperaRoutes);
 app.use('/cambios-equipo', cambiosEquipoRoutes);
 app.use('/ordenes-compra', ordenesCompraRoutes);
+app.use('/reportes', reportesRoutes);
+app.use('/conversaciones', conversacionesRoutes);
+app.use('/comentarios', comentariosRoutes);
 
 app.use((req, res) => {
   res.status(404).json({ error: 'Ruta no encontrada.' });
