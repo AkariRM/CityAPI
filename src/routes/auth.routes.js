@@ -1,4 +1,5 @@
 const express = require('express');
+const rateLimit = require('express-rate-limit');
 const { pool } = require('../db');
 const { verifyPin } = require('../utils/pin');
 const { signSession } = require('../utils/jwt');
@@ -9,6 +10,17 @@ const MAX_INTENTOS = 5;
 const BLOQUEO_MS = 15 * 60 * 1000;
 
 const ROLES_VALIDOS = ['admin', 'vendedor', 'tecnico', 'community_manager'];
+
+// Ademas del bloqueo por cuenta (abajo), esto limita cuantos intentos de
+// login puede hacer una misma IP en total — evita que alguien pruebe PINs
+// contra muchas cuentas distintas para esquivar el bloqueo por cuenta.
+const loginLimiter = rateLimit({
+  windowMs: 15 * 60 * 1000,
+  limit: 20,
+  standardHeaders: true,
+  legacyHeaders: false,
+  message: { error: 'Demasiados intentos de inicio de sesión desde este dispositivo. Intenta de nuevo en unos minutos.' },
+});
 
 // Lista publica (sin datos sensibles) para la pantalla de "elige tu usuario".
 router.get('/usuarios', async (req, res) => {
@@ -28,7 +40,7 @@ router.get('/usuarios', async (req, res) => {
   res.json(rows);
 });
 
-router.post('/login', async (req, res) => {
+router.post('/login', loginLimiter, async (req, res) => {
   const { usuario_id, pin } = req.body ?? {};
   if (!usuario_id || !pin) {
     return res.status(400).json({ error: 'usuario_id y pin son requeridos.' });

@@ -90,8 +90,11 @@ router.post('/', async (req, res) => {
   if (!METODOS_VALIDOS.includes(metodo_pago)) return res.status(400).json({ error: 'Método de pago inválido.' });
   if (!Array.isArray(items) || items.length === 0) return res.status(400).json({ error: 'La venta necesita al menos un producto.' });
   for (const item of items) {
-    if (!item.producto_id || !(item.cantidad > 0) || !(item.precio_unitario >= 0)) {
-      return res.status(400).json({ error: 'Cada producto necesita producto_id, cantidad y precio_unitario válidos.' });
+    if (!item.producto_id || !(item.cantidad > 0)) {
+      return res.status(400).json({ error: 'Cada producto necesita producto_id y cantidad válidos.' });
+    }
+    if (item.descuento !== undefined && !(Number(item.descuento) >= 0)) {
+      return res.status(400).json({ error: 'El descuento de cada producto debe ser mayor o igual a 0.' });
     }
   }
 
@@ -101,11 +104,22 @@ router.post('/', async (req, res) => {
 
     const tipos = {};
     const nombres = {};
+    const precios = {};
     for (const item of items) {
-      const producto = await client.query(`SELECT tipo, nombre FROM productos WHERE id = $1`, [item.producto_id]);
+      // El precio se toma siempre del catálogo, nunca de lo que mande el
+      // cliente — de lo contrario cualquiera con el token de un vendedor
+      // podría cobrar lo que quisiera por una venta.
+      const producto = await client.query(`SELECT tipo, nombre, precio_venta FROM productos WHERE id = $1`, [item.producto_id]);
       if (!producto.rows[0]) throw Object.assign(new Error('Producto no encontrado.'), { statusCode: 400 });
       tipos[item.producto_id] = producto.rows[0].tipo;
       nombres[item.producto_id] = producto.rows[0].nombre;
+      precios[item.producto_id] = Number(producto.rows[0].precio_venta);
+
+      const itemDescuento = Number(item.descuento) || 0;
+      if (itemDescuento > item.cantidad * precios[item.producto_id]) {
+        throw Object.assign(new Error(`El descuento de "${producto.rows[0].nombre}" no puede ser mayor a su subtotal.`), { statusCode: 400 });
+      }
+
       if (producto.rows[0].tipo === 'servicio') continue; // los servicios no manejan inventario
 
       const { rows } = await client.query(
@@ -118,8 +132,12 @@ router.post('/', async (req, res) => {
       }
     }
 
-    const subtotal = items.reduce((sum, i) => sum + i.cantidad * i.precio_unitario, 0);
-    const descuento = req.body.descuento ?? 0;
+    const subtotal = items.reduce((sum, i) => sum + i.cantidad * precios[i.producto_id], 0);
+    const descuentoSolicitado = Number(req.body.descuento) || 0;
+    if (descuentoSolicitado < 0 || descuentoSolicitado > subtotal) {
+      throw Object.assign(new Error('El descuento debe ser mayor o igual a 0 y no puede superar el subtotal.'), { statusCode: 400 });
+    }
+    const descuento = descuentoSolicitado;
     const total = subtotal - descuento;
 
     const ventaResult = await client.query(
@@ -131,11 +149,13 @@ router.post('/', async (req, res) => {
     const venta = ventaResult.rows[0];
 
     for (const item of items) {
-      const itemSubtotal = item.cantidad * item.precio_unitario - (item.descuento ?? 0);
+      const precioUnitario = precios[item.producto_id];
+      const itemDescuento = Number(item.descuento) || 0;
+      const itemSubtotal = item.cantidad * precioUnitario - itemDescuento;
       await client.query(
         `INSERT INTO venta_items (venta_id, producto_id, unidad_imei_id, cantidad, precio_unitario, descuento, subtotal)
          VALUES ($1, $2, $3, $4, $5, $6, $7)`,
-        [venta.id, item.producto_id, item.unidad_imei_id || null, item.cantidad, item.precio_unitario, item.descuento ?? 0, itemSubtotal]
+        [venta.id, item.producto_id, item.unidad_imei_id || null, item.cantidad, precioUnitario, itemDescuento, itemSubtotal]
       );
 
       if (tipos[item.producto_id] === 'servicio') continue;
@@ -155,7 +175,7 @@ router.post('/', async (req, res) => {
 
     await client.query('COMMIT');
 
-    const contexto = await pool.query(
+    const contexto = await client.query(
       `SELECT s.nombre AS sucursal_nombre, s.direccion AS sucursal_direccion, s.telefono AS sucursal_telefono,
               u.nombre AS vendedor_nombre,
               c.nombre AS cliente_nombre
@@ -165,7 +185,7 @@ router.post('/', async (req, res) => {
        WHERE s.id = $1`,
       [sucursal_id, req.usuario.sub, cliente_id || null]
     );
-    const configTicket = await obtenerConfiguracionTicket();
+    const configTicket = await obtenerConfiguracionTicket(client);
 
     res.status(201).json({
       id: venta.id,
@@ -186,8 +206,8 @@ router.post('/', async (req, res) => {
         producto_id: item.producto_id,
         nombre: nombres[item.producto_id],
         cantidad: item.cantidad,
-        precio_unitario: item.precio_unitario,
-        subtotal: item.cantidad * item.precio_unitario - (item.descuento ?? 0),
+        precio_unitario: precios[item.producto_id],
+        subtotal: item.cantidad * precios[item.producto_id] - (Number(item.descuento) || 0),
       })),
     });
   } catch (err) {

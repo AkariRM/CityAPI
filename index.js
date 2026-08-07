@@ -2,6 +2,7 @@ require('dotenv').config();
 
 const express = require('express');
 const cors = require('cors');
+const rateLimit = require('express-rate-limit');
 
 const authRoutes = require('./src/routes/auth.routes');
 const usuariosRoutes = require('./src/routes/usuarios.routes');
@@ -30,7 +31,26 @@ const conversacionesRoutes = require('./src/routes/conversaciones.routes');
 const comentariosRoutes = require('./src/routes/comentarios.routes');
 
 const app = express();
-app.use(cors());
+
+// Por defecto acepta cualquier origen (como antes) para no romper nada en
+// producción; si se define ALLOWED_ORIGINS (lista separada por comas) en el
+// entorno, solo esos orígenes podrán llamar a la API desde un navegador.
+const allowedOrigins = process.env.ALLOWED_ORIGINS
+  ? process.env.ALLOWED_ORIGINS.split(',').map((o) => o.trim())
+  : null;
+app.use(cors(allowedOrigins ? { origin: allowedOrigins } : undefined));
+
+// Limite general de peticiones por IP, como defensa basica contra abuso o
+// scripts descontrolados. El limite de /auth/login es aparte y mas estricto.
+app.use(
+  rateLimit({
+    windowMs: 15 * 60 * 1000,
+    limit: 600,
+    standardHeaders: true,
+    legacyHeaders: false,
+  })
+);
+
 app.use(express.json());
 
 app.get('/health', (req, res) => {
