@@ -2,6 +2,7 @@ const express = require('express');
 const { pool } = require('../db');
 const { requireAuth, requireRole } = require('../middleware/auth');
 const { inicioDiaUTC, finDiaUTCExclusivo } = require('../utils/fechas');
+const { obtenerConfiguracionTicket } = require('../utils/configuracionTicket');
 
 const router = express.Router();
 
@@ -27,8 +28,40 @@ router.get('/refacciones/reporte', async (req, res) => {
   res.json(rows);
 });
 
+// Igual que arriba, va antes de "/:id". Solo admin (es un reporte de
+// desempeño, como los reportes financieros). Agrupa por tecnico_id (incluye
+// NULL como "sin asignar"); dias_promedio se calcula de recepcion a la
+// primera vez que el folio paso por 'entregado' en el historial.
+router.get('/reporte-tecnicos', requireRole('admin'), async (req, res) => {
+  const { desde, hasta } = req.query;
+  const { rows } = await pool.query(
+    `WITH entregas AS (
+       SELECT reparacion_id, MIN(created_at) AS fecha_entrega
+       FROM reparacion_historial
+       WHERE estado = 'entregado'
+       GROUP BY reparacion_id
+     )
+     SELECT r.tecnico_id, t.nombre AS tecnico_nombre,
+            count(*)::int AS folios_totales,
+            count(*) FILTER (WHERE r.estado = 'entregado')::int AS folios_entregados,
+            COALESCE(sum(r.total), 0) AS total_facturado,
+            AVG(EXTRACT(EPOCH FROM (e.fecha_entrega - r.created_at)) / 86400) FILTER (WHERE e.fecha_entrega IS NOT NULL) AS dias_promedio
+     FROM reparaciones r
+     LEFT JOIN usuarios t ON t.id = r.tecnico_id
+     LEFT JOIN entregas e ON e.reparacion_id = r.id
+     WHERE ($1::timestamptz IS NULL OR r.created_at >= $1::timestamptz)
+       AND ($2::timestamptz IS NULL OR r.created_at < $2::timestamptz)
+     GROUP BY r.tecnico_id, t.nombre
+     ORDER BY total_facturado DESC`,
+    [desde ? inicioDiaUTC(desde) : null, hasta ? finDiaUTCExclusivo(hasta) : null]
+  );
+  res.json(rows);
+});
+
+// desde/hasta son opcionales (los usa la pantalla de Historial; el panel
+// Kanban los deja sin mandar y ve todo, igual que antes).
 router.get('/', async (req, res) => {
-  const { estado, tecnico_id, sucursal_id, q } = req.query;
+  const { estado, tecnico_id, sucursal_id, q, desde, hasta } = req.query;
   const { rows } = await pool.query(
     `SELECT r.id, r.folio, r.cliente_id, c.nombre AS cliente_nombre, r.sucursal_id,
             r.equipo_marca, r.equipo_modelo, r.imei_equipo, r.problema_reportado, r.diagnostico,
@@ -40,9 +73,11 @@ router.get('/', async (req, res) => {
      WHERE ($1::text IS NULL OR r.estado::text = $1)
        AND ($2::uuid IS NULL OR r.tecnico_id = $2::uuid)
        AND ($3::uuid IS NULL OR r.sucursal_id = $3::uuid)
-       AND ($4::text IS NULL OR r.folio ILIKE '%' || $4 || '%' OR c.nombre ILIKE '%' || $4 || '%')
+       AND ($4::text IS NULL OR r.folio ILIKE '%' || $4 || '%' OR c.nombre ILIKE '%' || $4 || '%' OR r.imei_equipo ILIKE '%' || $4 || '%')
+       AND ($5::timestamptz IS NULL OR r.created_at >= $5::timestamptz)
+       AND ($6::timestamptz IS NULL OR r.created_at < $6::timestamptz)
      ORDER BY r.created_at DESC`,
-    [estado || null, tecnico_id || null, sucursal_id || null, q || null]
+    [estado || null, tecnico_id || null, sucursal_id || null, q || null, desde ? inicioDiaUTC(desde) : null, hasta ? finDiaUTCExclusivo(hasta) : null]
   );
   res.json(rows);
 });
@@ -50,11 +85,13 @@ router.get('/', async (req, res) => {
 router.get('/:id', async (req, res) => {
   const reparacionResult = await pool.query(
     `SELECT r.id, r.folio, r.cliente_id, c.nombre AS cliente_nombre, c.telefono AS cliente_telefono, r.sucursal_id,
+            s.nombre AS sucursal_nombre, s.direccion AS sucursal_direccion, s.telefono AS sucursal_telefono,
             r.equipo_marca, r.equipo_modelo, r.imei_equipo, r.problema_reportado, r.diagnostico,
             r.estado, r.prioridad, r.tecnico_id, t.nombre AS tecnico_nombre,
             r.costo_mano_obra, r.costo_refacciones, r.total, r.garantia_dias, r.created_at, r.updated_at
      FROM reparaciones r
      JOIN clientes c ON c.id = r.cliente_id
+     JOIN sucursales s ON s.id = r.sucursal_id
      LEFT JOIN usuarios t ON t.id = r.tecnico_id
      WHERE r.id = $1`,
     [req.params.id]
@@ -80,7 +117,22 @@ router.get('/:id', async (req, res) => {
     [req.params.id]
   );
 
-  res.json({ ...reparacion, historial: historial.rows, refacciones: refacciones.rows });
+  // Datos del ticket embebidos aqui (no via GET /configuracion-ticket, que es
+  // solo-admin) para que tecnico/vendedor tambien puedan imprimir el
+  // comprobante sin necesitar ese permiso — mismo patron que POST /ventas.
+  const configTicket = await obtenerConfiguracionTicket();
+
+  res.json({
+    ...reparacion,
+    historial: historial.rows,
+    refacciones: refacciones.rows,
+    nombre_negocio: configTicket.nombre_negocio,
+    mostrar_direccion: configTicket.mostrar_direccion,
+    mostrar_telefono: configTicket.mostrar_telefono,
+    mostrar_tecnico: configTicket.mostrar_vendedor,
+    mostrar_cliente: configTicket.mostrar_cliente,
+    mensaje_pie: configTicket.mensaje_pie,
+  });
 });
 
 router.post('/', requireRole('admin', 'vendedor'), async (req, res) => {
@@ -191,6 +243,41 @@ router.patch('/:id', async (req, res) => {
   } finally {
     client.release();
   }
+});
+
+const CANALES_VALIDOS = ['whatsapp', 'sms'];
+
+// No hay integracion real de WhatsApp/SMS (requeriria WhatsApp Business API
+// o un gateway de SMS con credenciales que no tenemos) — esto es una
+// bitacora de que el vendedor/tecnico ya avisó al cliente por su cuenta
+// (llamada, WhatsApp personal, etc.), no un envio automatico. Por eso se
+// guarda directo como 'enviado' con enviado_at = ahora, no 'pendiente'.
+router.get('/:id/notificaciones', async (req, res) => {
+  const { rows } = await pool.query(
+    `SELECT id, canal, mensaje, estado, enviado_at, created_at
+     FROM notificaciones_cliente
+     WHERE reparacion_id = $1
+     ORDER BY created_at DESC`,
+    [req.params.id]
+  );
+  res.json(rows);
+});
+
+router.post('/:id/notificaciones', async (req, res) => {
+  const { canal, mensaje } = req.body ?? {};
+  if (!CANALES_VALIDOS.includes(canal)) return res.status(400).json({ error: 'Canal inválido.' });
+  if (!mensaje?.trim()) return res.status(400).json({ error: 'El mensaje es requerido.' });
+
+  const reparacionResult = await pool.query(`SELECT id FROM reparaciones WHERE id = $1`, [req.params.id]);
+  if (!reparacionResult.rows[0]) return res.status(404).json({ error: 'Reparación no encontrada.' });
+
+  const { rows } = await pool.query(
+    `INSERT INTO notificaciones_cliente (reparacion_id, canal, mensaje, estado, enviado_at)
+     VALUES ($1, $2, $3, 'enviado', now())
+     RETURNING id, canal, mensaje, estado, enviado_at, created_at`,
+    [req.params.id, canal, mensaje.trim()]
+  );
+  res.status(201).json(rows[0]);
 });
 
 router.post('/:id/refacciones', requireRole('admin', 'tecnico'), async (req, res) => {
