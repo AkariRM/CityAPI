@@ -1,7 +1,7 @@
 const express = require('express');
 const { pool } = require('../db');
 const { requireAuth, requireRole } = require('../middleware/auth');
-const { inicioDiaUTC, finDiaUTCExclusivo } = require('../utils/fechas');
+const { inicioDiaUTC, finDiaUTCExclusivo, hoyLocal } = require('../utils/fechas');
 
 const router = express.Router();
 router.use(requireAuth, requireRole('admin', 'vendedor'));
@@ -10,7 +10,7 @@ router.get('/', async (req, res) => {
   const { sucursal_id } = req.query;
   if (!sucursal_id) return res.status(400).json({ error: 'sucursal_id es requerido.' });
 
-  const hoy = new Date().toISOString().slice(0, 10);
+  const hoy = hoyLocal();
   const desdeUTC = inicioDiaUTC(hoy);
   const hastaUTC = finDiaUTCExclusivo(hoy);
 

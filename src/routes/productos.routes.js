@@ -12,13 +12,21 @@ router.use(requireAuth);
 // lectura y para vincular equipos en Marketplace; las demas rutas (alta,
 // edicion, stock, IMEI) siguen restringidas a quienes administran el catalogo.
 router.get('/', requireRole('admin', 'vendedor', 'tecnico', 'community_manager'), async (req, res) => {
-  const { sucursal_id, q, categoria_id, tipo } = req.query;
+  const { sucursal_id, q, categoria_id, tipo, cliente_id } = req.query;
   if (!sucursal_id) return res.status(400).json({ error: 'sucursal_id es requerido.' });
 
   const tipos = tipo ? tipo.split(',').map((t) => t.trim()) : null;
 
+  // precio_venta ya viene resuelto (precio especial del cliente > precio
+  // especial del rol del usuario que consulta > precio de lista), para que
+  // el catálogo del Punto de Venta y el precio cobrado en /ventas coincidan
+  // siempre. precio_lista y precio_especial se mandan aparte para poder
+  // mostrar en pantalla que un precio es especial.
   const { rows } = await pool.query(
-    `SELECT p.id, p.sku, p.nombre, p.tipo, p.marca, p.modelo, p.precio_venta, p.costo,
+    `SELECT p.id, p.sku, p.nombre, p.tipo, p.marca, p.modelo, p.costo,
+            p.precio_venta AS precio_lista,
+            COALESCE(pe_cliente.precio, pe_rol.precio, p.precio_venta) AS precio_venta,
+            (pe_cliente.precio IS NOT NULL OR pe_rol.precio IS NOT NULL) AS precio_especial,
             p.imagen_url, p.categoria_id, c.nombre AS categoria_nombre,
             p.proveedor_id, pv.nombre AS proveedor_nombre,
             COALESCE(i.stock_cantidad, 0) AS stock, COALESCE(i.stock_minimo, 0) AS stock_minimo
@@ -26,12 +34,14 @@ router.get('/', requireRole('admin', 'vendedor', 'tecnico', 'community_manager')
      LEFT JOIN categorias c ON c.id = p.categoria_id
      LEFT JOIN proveedores pv ON pv.id = p.proveedor_id
      LEFT JOIN inventario i ON i.producto_id = p.id AND i.sucursal_id = $1
+     LEFT JOIN precios_especiales pe_cliente ON pe_cliente.producto_id = p.id AND pe_cliente.cliente_id = $5::uuid
+     LEFT JOIN precios_especiales pe_rol ON pe_rol.producto_id = p.id AND pe_rol.rol = $6::rol_usuario
      WHERE p.activo = true
        AND ($2::uuid IS NULL OR p.categoria_id = $2::uuid)
        AND ($3::text IS NULL OR p.nombre ILIKE '%' || $3 || '%')
        AND ($4::text[] IS NULL OR p.tipo::text = ANY($4::text[]))
      ORDER BY p.nombre`,
-    [sucursal_id, categoria_id || null, q || null, tipos]
+    [sucursal_id, categoria_id || null, q || null, tipos, cliente_id || null, req.usuario.rol]
   );
   res.json(rows);
 });

@@ -1,6 +1,7 @@
 const express = require('express');
 const { pool } = require('../db');
 const { requireAuth, requireRole } = require('../middleware/auth');
+const { inicioDiaUTC, finDiaUTCExclusivo } = require('../utils/fechas');
 
 const router = express.Router();
 
@@ -37,6 +38,32 @@ async function calcularResumen(sucursal_id, usuario_id) {
     cantidad_ventas: cantidadVentas,
   };
 }
+
+// Listado/historial de cortes (turnos) para la pantalla de Historial de
+// ventas. Igual que en /ventas, un vendedor solo ve sus propios cortes; el
+// admin puede ver los de cualquiera o los de todos.
+router.get('/', async (req, res) => {
+  const { sucursal_id, usuario_id, desde, hasta } = req.query;
+  if (!sucursal_id) return res.status(400).json({ error: 'sucursal_id es requerido.' });
+
+  const usuarioFiltro = req.usuario.rol === 'vendedor' ? req.usuario.sub : usuario_id || null;
+
+  const { rows } = await pool.query(
+    `SELECT cc.id, cc.sucursal_id, cc.usuario_id, u.nombre AS usuario_nombre,
+            cc.turno_inicio, cc.turno_fin, cc.fondo_inicial, cc.total_efectivo, cc.total_tarjeta,
+            cc.total_credito, cc.total_sistema, cc.diferencia, cc.created_at
+     FROM cortes_caja cc
+     LEFT JOIN usuarios u ON u.id = cc.usuario_id
+     WHERE cc.sucursal_id = $1
+       AND ($2::uuid IS NULL OR cc.usuario_id = $2::uuid)
+       AND ($3::timestamptz IS NULL OR cc.turno_fin >= $3::timestamptz)
+       AND ($4::timestamptz IS NULL OR cc.turno_fin < $4::timestamptz)
+     ORDER BY cc.turno_fin DESC
+     LIMIT 200`,
+    [sucursal_id, usuarioFiltro, desde ? inicioDiaUTC(desde) : null, hasta ? finDiaUTCExclusivo(hasta) : null]
+  );
+  res.json(rows);
+});
 
 router.get('/resumen', async (req, res) => {
   const { sucursal_id } = req.query;

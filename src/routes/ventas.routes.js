@@ -2,7 +2,7 @@ const express = require('express');
 const { pool } = require('../db');
 const { requireAuth, requireRole } = require('../middleware/auth');
 const { obtenerConfiguracionTicket } = require('../utils/configuracionTicket');
-const { inicioDiaUTC, finDiaUTCExclusivo } = require('../utils/fechas');
+const { inicioDiaUTC, finDiaUTCExclusivo, hoyLocal } = require('../utils/fechas');
 
 const router = express.Router();
 
@@ -16,7 +16,7 @@ const METODOS_VALIDOS = ['efectivo', 'tarjeta'];
 router.get('/resumen-dia', async (req, res) => {
   const { sucursal_id, fecha } = req.query;
   if (!sucursal_id) return res.status(400).json({ error: 'sucursal_id es requerido.' });
-  const dia = fecha || new Date().toISOString().slice(0, 10);
+  const dia = fecha || hoyLocal();
 
   const { rows } = await pool.query(
     `SELECT COALESCE(sum(total), 0) AS total, count(*)::int AS cantidad
@@ -28,13 +28,33 @@ router.get('/resumen-dia', async (req, res) => {
   res.json({ fecha: dia, total: Number(rows[0].total), cantidad: rows[0].cantidad });
 });
 
-// Sin folio: navegar las ventas de los ultimos 7 dias de una sucursal (usado
-// por Cambios/devoluciones para elegir la venta sin teclear el folio).
+// Sin folio ni filtros de historial: navegar las ventas de los ultimos 7
+// dias de una sucursal (usado por Cambios/devoluciones para elegir la venta
+// sin teclear el folio). Con desde/hasta/vendedor_id: historial completo
+// (usado por la pantalla de Historial de ventas), restringido por rol — un
+// vendedor solo puede ver su propio historial, el admin puede ver el de
+// cualquiera o el de todos.
 router.get('/', async (req, res) => {
-  const { folio, sucursal_id } = req.query;
+  const { folio, sucursal_id, desde, hasta, vendedor_id } = req.query;
 
-  if (!folio) {
-    if (!sucursal_id) return res.status(400).json({ error: 'folio o sucursal_id son requeridos.' });
+  if (folio) {
+    const { rows } = await pool.query(
+      `SELECT v.id, v.folio, v.sucursal_id, v.subtotal, v.descuento, v.total, v.metodo_pago, v.estado, v.created_at,
+              c.nombre AS cliente_nombre
+       FROM ventas v
+       LEFT JOIN clientes c ON c.id = v.cliente_id
+       WHERE v.folio ILIKE '%' || $1 || '%'
+       ORDER BY v.created_at DESC
+       LIMIT 10`,
+      [folio]
+    );
+    return res.json(rows);
+  }
+
+  if (!sucursal_id) return res.status(400).json({ error: 'folio o sucursal_id son requeridos.' });
+
+  const esHistorial = Boolean(desde || hasta || vendedor_id);
+  if (!esHistorial) {
     const { rows } = await pool.query(
       `SELECT v.id, v.folio, v.sucursal_id, v.subtotal, v.descuento, v.total, v.metodo_pago, v.estado, v.created_at,
               c.nombre AS cliente_nombre
@@ -48,15 +68,22 @@ router.get('/', async (req, res) => {
     return res.json(rows);
   }
 
+  const vendedorFiltro = req.usuario.rol === 'vendedor' ? req.usuario.sub : vendedor_id || null;
+
   const { rows } = await pool.query(
-    `SELECT v.id, v.folio, v.sucursal_id, v.subtotal, v.descuento, v.total, v.metodo_pago, v.estado, v.created_at,
+    `SELECT v.id, v.folio, v.sucursal_id, v.vendedor_id, u.nombre AS vendedor_nombre,
+            v.subtotal, v.descuento, v.total, v.metodo_pago, v.estado, v.created_at,
             c.nombre AS cliente_nombre
      FROM ventas v
      LEFT JOIN clientes c ON c.id = v.cliente_id
-     WHERE v.folio ILIKE '%' || $1 || '%'
+     LEFT JOIN usuarios u ON u.id = v.vendedor_id
+     WHERE v.sucursal_id = $1 AND v.estado = 'completada'
+       AND ($2::uuid IS NULL OR v.vendedor_id = $2::uuid)
+       AND ($3::timestamptz IS NULL OR v.created_at >= $3::timestamptz)
+       AND ($4::timestamptz IS NULL OR v.created_at < $4::timestamptz)
      ORDER BY v.created_at DESC
-     LIMIT 10`,
-    [folio]
+     LIMIT 500`,
+    [sucursal_id, vendedorFiltro, desde ? inicioDiaUTC(desde) : null, hasta ? finDiaUTCExclusivo(hasta) : null]
   );
   res.json(rows);
 });
@@ -106,10 +133,19 @@ router.post('/', async (req, res) => {
     const nombres = {};
     const precios = {};
     for (const item of items) {
-      // El precio se toma siempre del catálogo, nunca de lo que mande el
-      // cliente — de lo contrario cualquiera con el token de un vendedor
+      // El precio se toma siempre del catálogo (con precio especial del
+      // cliente o del rol del vendedor ya resuelto), nunca de lo que mande
+      // el cliente — de lo contrario cualquiera con el token de un vendedor
       // podría cobrar lo que quisiera por una venta.
-      const producto = await client.query(`SELECT tipo, nombre, precio_venta FROM productos WHERE id = $1`, [item.producto_id]);
+      const producto = await client.query(
+        `SELECT p.tipo, p.nombre,
+                COALESCE(pe_cliente.precio, pe_rol.precio, p.precio_venta) AS precio_venta
+         FROM productos p
+         LEFT JOIN precios_especiales pe_cliente ON pe_cliente.producto_id = p.id AND pe_cliente.cliente_id = $2::uuid
+         LEFT JOIN precios_especiales pe_rol ON pe_rol.producto_id = p.id AND pe_rol.rol = $3::rol_usuario
+         WHERE p.id = $1`,
+        [item.producto_id, cliente_id || null, req.usuario.rol]
+      );
       if (!producto.rows[0]) throw Object.assign(new Error('Producto no encontrado.'), { statusCode: 400 });
       tipos[item.producto_id] = producto.rows[0].tipo;
       nombres[item.producto_id] = producto.rows[0].nombre;
