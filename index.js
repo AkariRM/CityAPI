@@ -30,6 +30,7 @@ const ordenesCompraRoutes = require('./src/routes/ordenesCompra.routes');
 const reportesRoutes = require('./src/routes/reportes.routes');
 const conversacionesRoutes = require('./src/routes/conversaciones.routes');
 const comentariosRoutes = require('./src/routes/comentarios.routes');
+const uploadsRoutes = require('./src/routes/uploads.routes');
 
 const app = express();
 
@@ -88,6 +89,7 @@ app.use('/ordenes-compra', ordenesCompraRoutes);
 app.use('/reportes', reportesRoutes);
 app.use('/conversaciones', conversacionesRoutes);
 app.use('/comentarios', comentariosRoutes);
+app.use('/uploads', uploadsRoutes);
 
 app.use((req, res) => {
   res.status(404).json({ error: 'Ruta no encontrada.' });
