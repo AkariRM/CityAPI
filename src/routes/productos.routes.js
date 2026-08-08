@@ -126,6 +126,7 @@ router.patch('/:id', requireRole('admin', 'vendedor'), async (req, res) => {
     marca: req.body?.marca,
     modelo: req.body?.modelo,
     proveedor_id: req.body?.proveedor_id,
+    imagen_url: req.body?.imagen_url,
     activo: req.body?.activo,
   };
   const sets = [];
