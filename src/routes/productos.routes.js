@@ -12,10 +12,11 @@ router.use(requireAuth);
 // lectura y para vincular equipos en Marketplace; las demas rutas (alta,
 // edicion, stock, IMEI) siguen restringidas a quienes administran el catalogo.
 router.get('/', requireRole('admin', 'vendedor', 'tecnico', 'community_manager'), async (req, res) => {
-  const { sucursal_id, q, categoria_id, tipo, cliente_id } = req.query;
+  const { sucursal_id, q, categoria_id, tipo, cliente_id, activo } = req.query;
   if (!sucursal_id) return res.status(400).json({ error: 'sucursal_id es requerido.' });
 
   const tipos = tipo ? tipo.split(',').map((t) => t.trim()) : null;
+  const activoFiltro = activo === undefined ? true : activo === 'true';
 
   // precio_venta ya viene resuelto (precio especial del cliente > precio
   // especial del rol del usuario que consulta > precio de lista), para que
@@ -23,7 +24,8 @@ router.get('/', requireRole('admin', 'vendedor', 'tecnico', 'community_manager')
   // siempre. precio_lista y precio_especial se mandan aparte para poder
   // mostrar en pantalla que un precio es especial.
   const { rows } = await pool.query(
-    `SELECT p.id, p.sku, p.nombre, p.tipo, p.marca, p.modelo, p.ram, p.almacenamiento, p.procesador, p.costo,
+    `SELECT p.id, p.sku, p.nombre, p.tipo, p.marca, p.modelo, p.ram, p.almacenamiento, p.procesador,
+            p.usa_imei, p.activo, p.costo,
             p.precio_venta AS precio_lista,
             COALESCE(pe_cliente.precio, pe_rol.precio, p.precio_venta) AS precio_venta,
             (pe_cliente.precio IS NOT NULL OR pe_rol.precio IS NOT NULL) AS precio_especial,
@@ -36,12 +38,12 @@ router.get('/', requireRole('admin', 'vendedor', 'tecnico', 'community_manager')
      LEFT JOIN inventario i ON i.producto_id = p.id AND i.sucursal_id = $1
      LEFT JOIN precios_especiales pe_cliente ON pe_cliente.producto_id = p.id AND pe_cliente.cliente_id = $5::uuid
      LEFT JOIN precios_especiales pe_rol ON pe_rol.producto_id = p.id AND pe_rol.rol = $6::rol_usuario
-     WHERE p.activo = true
+     WHERE p.activo = $7::boolean
        AND ($2::uuid IS NULL OR p.categoria_id = $2::uuid)
        AND ($3::text IS NULL OR p.nombre ILIKE '%' || $3 || '%')
        AND ($4::text[] IS NULL OR p.tipo::text = ANY($4::text[]))
      ORDER BY p.nombre`,
-    [sucursal_id, categoria_id || null, q || null, tipos, cliente_id || null, req.usuario.rol]
+    [sucursal_id, categoria_id || null, q || null, tipos, cliente_id || null, req.usuario.rol, activoFiltro]
   );
   res.json(rows);
 });
@@ -72,7 +74,7 @@ router.get('/movimientos', requireRole('admin', 'vendedor'), async (req, res) =>
 
 router.post('/', requireRole('admin', 'vendedor'), async (req, res) => {
   const {
-    sku, nombre, categoria_id, tipo, marca, modelo, ram, almacenamiento, procesador,
+    sku, nombre, categoria_id, tipo, marca, modelo, ram, almacenamiento, procesador, usa_imei,
     precio_venta, costo, imagen_url, proveedor_id, sucursal_id, stock_inicial,
   } = req.body ?? {};
   if (!nombre?.trim()) return res.status(400).json({ error: 'El nombre es requerido.' });
@@ -88,12 +90,12 @@ router.post('/', requireRole('admin', 'vendedor'), async (req, res) => {
     await client.query('BEGIN');
 
     const producto = await client.query(
-      `INSERT INTO productos (sku, nombre, categoria_id, tipo, marca, modelo, ram, almacenamiento, procesador, precio_venta, costo, imagen_url, proveedor_id)
-       VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13)
-       RETURNING id, sku, nombre, categoria_id, tipo, marca, modelo, ram, almacenamiento, procesador, precio_venta, costo, imagen_url, proveedor_id, activo`,
+      `INSERT INTO productos (sku, nombre, categoria_id, tipo, marca, modelo, ram, almacenamiento, procesador, usa_imei, precio_venta, costo, imagen_url, proveedor_id)
+       VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14)
+       RETURNING id, sku, nombre, categoria_id, tipo, marca, modelo, ram, almacenamiento, procesador, usa_imei, precio_venta, costo, imagen_url, proveedor_id, activo`,
       [
         sku || null, nombre.trim(), categoria_id || null, tipo, marca || null, modelo || null,
-        ram || null, almacenamiento || null, procesador || null,
+        ram || null, almacenamiento || null, procesador || null, usa_imei === false ? false : true,
         precio_venta ?? 0, costo ?? 0, imagen_url || null, proveedor_id || null,
       ]
     );
@@ -134,6 +136,7 @@ router.patch('/:id', requireRole('admin', 'vendedor'), async (req, res) => {
     ram: req.body?.ram,
     almacenamiento: req.body?.almacenamiento,
     procesador: req.body?.procesador,
+    usa_imei: req.body?.usa_imei,
     proveedor_id: req.body?.proveedor_id,
     imagen_url: req.body?.imagen_url,
     activo: req.body?.activo,
@@ -152,7 +155,7 @@ router.patch('/:id', requireRole('admin', 'vendedor'), async (req, res) => {
   values.push(req.params.id);
   const { rows } = await pool.query(
     `UPDATE productos SET ${sets.join(', ')} WHERE id = $${i}
-     RETURNING id, sku, nombre, categoria_id, tipo, marca, modelo, ram, almacenamiento, procesador, precio_venta, costo, imagen_url, proveedor_id, activo`,
+     RETURNING id, sku, nombre, categoria_id, tipo, marca, modelo, ram, almacenamiento, procesador, usa_imei, precio_venta, costo, imagen_url, proveedor_id, activo`,
     values
   );
   if (!rows[0]) return res.status(404).json({ error: 'Producto no encontrado.' });
@@ -229,7 +232,7 @@ router.get('/:id/unidades', requireRole('admin', 'vendedor'), async (req, res) =
   const { rows } = await pool.query(
     `SELECT id, imei, condicion, costo_adquisicion, estado, created_at
      FROM unidades_imei
-     WHERE producto_id = $1 AND ($2::uuid IS NULL OR sucursal_id = $2::uuid)
+     WHERE producto_id = $1 AND estado != 'baja' AND ($2::uuid IS NULL OR sucursal_id = $2::uuid)
      ORDER BY created_at DESC`,
     [req.params.id, sucursal_id || null]
   );
@@ -239,7 +242,6 @@ router.get('/:id/unidades', requireRole('admin', 'vendedor'), async (req, res) =
 router.post('/:id/unidades', requireRole('admin', 'vendedor'), async (req, res) => {
   const { sucursal_id, imei, condicion, costo_adquisicion } = req.body ?? {};
   if (!sucursal_id) return res.status(400).json({ error: 'sucursal_id es requerido.' });
-  if (!imei?.trim()) return res.status(400).json({ error: 'El IMEI es requerido.' });
 
   const client = await pool.connect();
   try {
@@ -249,7 +251,7 @@ router.post('/:id/unidades', requireRole('admin', 'vendedor'), async (req, res) 
       `INSERT INTO unidades_imei (producto_id, sucursal_id, imei, condicion, costo_adquisicion)
        VALUES ($1, $2, $3, $4, $5)
        RETURNING id, imei, condicion, costo_adquisicion, estado, created_at`,
-      [req.params.id, sucursal_id, imei.trim(), condicion || null, costo_adquisicion || null]
+      [req.params.id, sucursal_id, imei?.trim() || null, condicion || null, costo_adquisicion || null]
     );
 
     await client.query(
@@ -275,6 +277,51 @@ router.post('/:id/unidades', requireRole('admin', 'vendedor'), async (req, res) 
       console.error(err);
       res.status(500).json({ error: 'Error interno del servidor.' });
     }
+  } finally {
+    client.release();
+  }
+});
+
+router.delete('/:id/unidades/:unidadId', requireRole('admin', 'vendedor'), async (req, res) => {
+  const client = await pool.connect();
+  try {
+    await client.query('BEGIN');
+
+    const { rows } = await client.query(
+      `SELECT id, sucursal_id, estado FROM unidades_imei WHERE id = $1 AND producto_id = $2 FOR UPDATE`,
+      [req.params.unidadId, req.params.id]
+    );
+    const unidad = rows[0];
+    if (!unidad) throw Object.assign(new Error('Unidad no encontrada.'), { statusCode: 404 });
+    if (unidad.estado === 'baja') {
+      throw Object.assign(new Error('Esa unidad ya fue eliminada.'), { statusCode: 409 });
+    }
+
+    const venta = await client.query(`SELECT 1 FROM venta_items WHERE unidad_imei_id = $1 LIMIT 1`, [unidad.id]);
+    if (venta.rows.length > 0) {
+      throw Object.assign(new Error('No se puede eliminar una unidad ya vendida.'), { statusCode: 409 });
+    }
+
+    await client.query(`UPDATE unidades_imei SET estado = 'baja', updated_at = now() WHERE id = $1`, [unidad.id]);
+
+    await client.query(
+      `UPDATE inventario SET stock_cantidad = GREATEST(stock_cantidad - 1, 0), updated_at = now()
+       WHERE producto_id = $1 AND sucursal_id = $2`,
+      [req.params.id, unidad.sucursal_id]
+    );
+
+    await client.query(
+      `INSERT INTO movimientos_inventario (producto_id, sucursal_id, tipo, cantidad, motivo, referencia_tipo, referencia_id, usuario_id)
+       VALUES ($1, $2, 'salida', 1, 'Baja de unidad IMEI', 'unidad_imei', $3, $4)`,
+      [req.params.id, unidad.sucursal_id, unidad.id, req.usuario.sub]
+    );
+
+    await client.query('COMMIT');
+    res.json({ ok: true });
+  } catch (err) {
+    await client.query('ROLLBACK');
+    res.status(err.statusCode ?? 500).json({ error: err.statusCode ? err.message : 'Error interno del servidor.' });
+    if (!err.statusCode) console.error(err);
   } finally {
     client.release();
   }
