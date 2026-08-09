@@ -23,7 +23,7 @@ router.get('/', requireRole('admin', 'vendedor', 'tecnico', 'community_manager')
   // siempre. precio_lista y precio_especial se mandan aparte para poder
   // mostrar en pantalla que un precio es especial.
   const { rows } = await pool.query(
-    `SELECT p.id, p.sku, p.nombre, p.tipo, p.marca, p.modelo, p.costo,
+    `SELECT p.id, p.sku, p.nombre, p.tipo, p.marca, p.modelo, p.ram, p.almacenamiento, p.procesador, p.costo,
             p.precio_venta AS precio_lista,
             COALESCE(pe_cliente.precio, pe_rol.precio, p.precio_venta) AS precio_venta,
             (pe_cliente.precio IS NOT NULL OR pe_rol.precio IS NOT NULL) AS precio_especial,
@@ -71,8 +71,10 @@ router.get('/movimientos', requireRole('admin', 'vendedor'), async (req, res) =>
 });
 
 router.post('/', requireRole('admin', 'vendedor'), async (req, res) => {
-  const { sku, nombre, categoria_id, tipo, marca, modelo, precio_venta, costo, imagen_url, proveedor_id, sucursal_id, stock_inicial } =
-    req.body ?? {};
+  const {
+    sku, nombre, categoria_id, tipo, marca, modelo, ram, almacenamiento, procesador,
+    precio_venta, costo, imagen_url, proveedor_id, sucursal_id, stock_inicial,
+  } = req.body ?? {};
   if (!nombre?.trim()) return res.status(400).json({ error: 'El nombre es requerido.' });
   if (!['nuevo', 'usado', 'accesorio', 'servicio'].includes(tipo)) {
     return res.status(400).json({ error: 'Tipo inválido.' });
@@ -86,10 +88,14 @@ router.post('/', requireRole('admin', 'vendedor'), async (req, res) => {
     await client.query('BEGIN');
 
     const producto = await client.query(
-      `INSERT INTO productos (sku, nombre, categoria_id, tipo, marca, modelo, precio_venta, costo, imagen_url, proveedor_id)
-       VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10)
-       RETURNING id, sku, nombre, categoria_id, tipo, marca, modelo, precio_venta, costo, imagen_url, proveedor_id, activo`,
-      [sku || null, nombre.trim(), categoria_id || null, tipo, marca || null, modelo || null, precio_venta ?? 0, costo ?? 0, imagen_url || null, proveedor_id || null]
+      `INSERT INTO productos (sku, nombre, categoria_id, tipo, marca, modelo, ram, almacenamiento, procesador, precio_venta, costo, imagen_url, proveedor_id)
+       VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13)
+       RETURNING id, sku, nombre, categoria_id, tipo, marca, modelo, ram, almacenamiento, procesador, precio_venta, costo, imagen_url, proveedor_id, activo`,
+      [
+        sku || null, nombre.trim(), categoria_id || null, tipo, marca || null, modelo || null,
+        ram || null, almacenamiento || null, procesador || null,
+        precio_venta ?? 0, costo ?? 0, imagen_url || null, proveedor_id || null,
+      ]
     );
 
     if (sucursal_id) {
@@ -125,6 +131,9 @@ router.patch('/:id', requireRole('admin', 'vendedor'), async (req, res) => {
     costo: req.body?.costo,
     marca: req.body?.marca,
     modelo: req.body?.modelo,
+    ram: req.body?.ram,
+    almacenamiento: req.body?.almacenamiento,
+    procesador: req.body?.procesador,
     proveedor_id: req.body?.proveedor_id,
     imagen_url: req.body?.imagen_url,
     activo: req.body?.activo,
@@ -143,7 +152,7 @@ router.patch('/:id', requireRole('admin', 'vendedor'), async (req, res) => {
   values.push(req.params.id);
   const { rows } = await pool.query(
     `UPDATE productos SET ${sets.join(', ')} WHERE id = $${i}
-     RETURNING id, sku, nombre, categoria_id, tipo, marca, modelo, precio_venta, costo, imagen_url, proveedor_id, activo`,
+     RETURNING id, sku, nombre, categoria_id, tipo, marca, modelo, ram, almacenamiento, procesador, precio_venta, costo, imagen_url, proveedor_id, activo`,
     values
   );
   if (!rows[0]) return res.status(404).json({ error: 'Producto no encontrado.' });
