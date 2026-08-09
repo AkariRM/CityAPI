@@ -34,6 +34,15 @@ const uploadsRoutes = require('./src/routes/uploads.routes');
 
 const app = express();
 
+// Render pone la app detras de un solo proxy reverso, que manda la IP real
+// del cliente en X-Forwarded-For. Sin esto, Express no confia en ese header
+// (trust proxy = false por defecto) y express-rate-limit truena en cada
+// petición (ERR_ERL_UNEXPECTED_X_FORWARDED_FOR) — ademas de que, sin esto,
+// el rate limit terminaria limitando por la IP del proxy de Render, no por
+// cliente real. "1" = confiar exactamente un salto de proxy, que es la
+// topología real de Render (no usar "true", que confía en cualquier salto).
+app.set('trust proxy', 1);
+
 // Por defecto acepta cualquier origen (como antes) para no romper nada en
 // producción; si se define ALLOWED_ORIGINS (lista separada por comas) en el
 // entorno, solo esos orígenes podrán llamar a la API desde un navegador.

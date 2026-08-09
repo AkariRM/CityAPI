@@ -25,21 +25,33 @@ const upload = multer({
 // que proteger); lo que si esta cerrado es la escritura — solo este
 // endpoint, autenticado y con la service_role key que vive nada mas aqui
 // en el servidor, puede subir archivos. La app nunca ve esa llave.
-const supabase = createClient(process.env.SUPABASE_URL, process.env.SUPABASE_SERVICE_ROLE_KEY);
+//
+// El cliente se crea de forma perezosa (no al cargar el modulo) porque
+// createClient() truena de inmediato si falta SUPABASE_URL — si eso pasara
+// al hacer require() de esta ruta, tumbaria TODA la API al arrancar, no
+// solo esta ruta. Asi, si falta configurar la variable, solo esta ruta
+// responde 500 y el resto del servidor sigue funcionando normal.
+let supabase = null;
+function obtenerSupabase() {
+  if (!process.env.SUPABASE_URL || !process.env.SUPABASE_SERVICE_ROLE_KEY) return null;
+  if (!supabase) supabase = createClient(process.env.SUPABASE_URL, process.env.SUPABASE_SERVICE_ROLE_KEY);
+  return supabase;
+}
 
 router.post('/imagen', (req, res) => {
   upload.single('imagen')(req, res, async (err) => {
     if (err) return res.status(err.statusCode ?? 400).json({ error: err.message });
     if (!req.file) return res.status(400).json({ error: 'No se recibió ninguna imagen.' });
 
-    if (!process.env.SUPABASE_URL || !process.env.SUPABASE_SERVICE_ROLE_KEY) {
+    const supabaseClient = obtenerSupabase();
+    if (!supabaseClient) {
       console.error('Faltan SUPABASE_URL / SUPABASE_SERVICE_ROLE_KEY en el entorno.');
       return res.status(500).json({ error: 'La subida de imágenes no está configurada en el servidor.' });
     }
 
     const nombreArchivo = `${crypto.randomUUID()}.${TIPOS_VALIDOS[req.file.mimetype]}`;
 
-    const { error } = await supabase.storage.from(BUCKET).upload(nombreArchivo, req.file.buffer, {
+    const { error } = await supabaseClient.storage.from(BUCKET).upload(nombreArchivo, req.file.buffer, {
       contentType: req.file.mimetype,
       upsert: false,
     });
@@ -48,7 +60,7 @@ router.post('/imagen', (req, res) => {
       return res.status(500).json({ error: 'No se pudo subir la imagen.' });
     }
 
-    const { data } = supabase.storage.from(BUCKET).getPublicUrl(nombreArchivo);
+    const { data } = supabaseClient.storage.from(BUCKET).getPublicUrl(nombreArchivo);
     res.status(201).json({ url: data.publicUrl });
   });
 });
