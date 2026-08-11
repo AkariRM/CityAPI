@@ -28,6 +28,29 @@ router.get('/resumen-dia', async (req, res) => {
   res.json({ fecha: dia, total: Number(rows[0].total), cantidad: rows[0].cantidad });
 });
 
+// Para la grafica de ventas del Dashboard: un total por dia dentro de un
+// rango. Solo trae los dias que sí tuvieron ventas — el llamador rellena
+// con $0 los dias sin movimiento. El offset fijo de -6h (mismo que
+// inicioDiaUTC/finDiaUTCExclusivo) convierte cada created_at a su dia
+// calendario local de Sahuayo antes de agrupar.
+router.get('/resumen-rango', async (req, res) => {
+  const { sucursal_id, desde, hasta } = req.query;
+  if (!sucursal_id) return res.status(400).json({ error: 'sucursal_id es requerido.' });
+  if (!desde || !hasta) return res.status(400).json({ error: 'desde y hasta son requeridos (YYYY-MM-DD).' });
+
+  const { rows } = await pool.query(
+    `SELECT (date_trunc('day', created_at - interval '6 hours'))::date::text AS dia,
+            COALESCE(sum(total), 0) AS total, count(*)::int AS cantidad
+     FROM ventas
+     WHERE sucursal_id = $1 AND estado = 'completada'
+       AND created_at >= $2::timestamptz AND created_at < $3::timestamptz
+     GROUP BY dia
+     ORDER BY dia`,
+    [sucursal_id, inicioDiaUTC(desde), finDiaUTCExclusivo(hasta)]
+  );
+  res.json(rows.map((r) => ({ fecha: r.dia, total: Number(r.total), cantidad: r.cantidad })));
+});
+
 // Sin folio ni filtros de historial: navegar las ventas de los ultimos 7
 // dias de una sucursal (usado por Cambios/devoluciones para elegir la venta
 // sin teclear el folio). Con desde/hasta/vendedor_id: historial completo
