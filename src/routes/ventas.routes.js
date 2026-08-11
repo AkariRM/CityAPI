@@ -8,7 +8,7 @@ const router = express.Router();
 
 router.use(requireAuth, requireRole('admin', 'vendedor'));
 
-const METODOS_VALIDOS = ['efectivo', 'tarjeta'];
+const METODOS_VALIDOS = ['efectivo', 'tarjeta', 'credito'];
 
 // Total de ventas de un dia, sin costos ni utilidad — a diferencia de
 // /finanzas/resumen (solo admin), esto lo puede ver tambien el vendedor
@@ -111,10 +111,16 @@ router.get('/:id', async (req, res) => {
 });
 
 router.post('/', async (req, res) => {
-  const { sucursal_id, cliente_id, metodo_pago, items } = req.body ?? {};
+  const { sucursal_id, cliente_id, metodo_pago, items, limite_aprobado, condiciones } = req.body ?? {};
 
   if (!sucursal_id) return res.status(400).json({ error: 'sucursal_id es requerido.' });
   if (!METODOS_VALIDOS.includes(metodo_pago)) return res.status(400).json({ error: 'Método de pago inválido.' });
+  if (metodo_pago === 'credito') {
+    // La autorizacion de credito (limite y condiciones) es responsabilidad
+    // del Admin — un vendedor no puede abrir un credito por su cuenta.
+    if (req.usuario.rol !== 'admin') return res.status(403).json({ error: 'Solo un administrador puede autorizar una venta a crédito.' });
+    if (!cliente_id) return res.status(400).json({ error: 'Una venta a crédito necesita un cliente.' });
+  }
   if (!Array.isArray(items) || items.length === 0) return res.status(400).json({ error: 'La venta necesita al menos un producto.' });
   for (const item of items) {
     if (!item.producto_id || !(item.cantidad > 0)) {
@@ -209,6 +215,17 @@ router.post('/', async (req, res) => {
       );
     }
 
+    let credito = null;
+    if (metodo_pago === 'credito') {
+      const creditoResult = await client.query(
+        `INSERT INTO creditos (cliente_id, venta_id, monto_total, saldo_pendiente, autorizado_por, limite_aprobado, condiciones)
+         VALUES ($1, $2, $3, $3, $4, $5, $6)
+         RETURNING id, monto_total, saldo_pendiente, limite_aprobado, condiciones`,
+        [cliente_id, venta.id, total, req.usuario.sub, limite_aprobado ?? null, condiciones || null]
+      );
+      credito = creditoResult.rows[0];
+    }
+
     await client.query('COMMIT');
 
     const contexto = await client.query(
@@ -230,6 +247,7 @@ router.post('/', async (req, res) => {
       descuento,
       total,
       metodo_pago,
+      credito,
       created_at: venta.created_at,
       ...contexto.rows[0],
       nombre_negocio: configTicket.nombre_negocio,

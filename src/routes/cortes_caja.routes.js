@@ -14,7 +14,7 @@ async function calcularResumen(sucursal_id, usuario_id) {
   );
   const desde = ultimoCorte.rows[0]?.turno_fin ?? null;
 
-  const { rows } = await pool.query(
+  const ventasPorMetodo = await pool.query(
     `SELECT metodo_pago, count(*)::int AS cantidad, COALESCE(sum(total), 0) AS total
      FROM ventas
      WHERE sucursal_id = $1 AND vendedor_id = $2 AND estado = 'completada'
@@ -23,19 +23,38 @@ async function calcularResumen(sucursal_id, usuario_id) {
     [sucursal_id, usuario_id, desde]
   );
 
-  const totales = { efectivo: 0, tarjeta: 0 };
+  // Un abono de credito es dinero real que entra a la caja de quien lo
+  // cobra (aunque la venta original haya sido de otro turno u otro
+  // vendedor), asi que cuenta igual que una venta en efectivo/tarjeta.
+  const abonosPorMetodo = await pool.query(
+    `SELECT metodo, count(*)::int AS cantidad, COALESCE(sum(monto), 0) AS total
+     FROM abonos
+     WHERE usuario_id = $1
+       AND created_at > COALESCE($2::timestamptz, date_trunc('day', now()))
+     GROUP BY metodo`,
+    [usuario_id, desde]
+  );
+
+  const totales = { efectivo: 0, tarjeta: 0, credito: 0 };
   let cantidadVentas = 0;
-  for (const row of rows) {
-    totales[row.metodo_pago] = Number(row.total);
+  for (const row of ventasPorMetodo.rows) {
+    totales[row.metodo_pago] += Number(row.total);
     cantidadVentas += row.cantidad;
+  }
+  let cantidadAbonos = 0;
+  for (const row of abonosPorMetodo.rows) {
+    totales[row.metodo] += Number(row.total);
+    cantidadAbonos += row.cantidad;
   }
 
   return {
     turno_inicio: desde ?? null,
     total_efectivo: totales.efectivo,
     total_tarjeta: totales.tarjeta,
+    total_credito: totales.credito,
     total_sistema: totales.efectivo + totales.tarjeta,
     cantidad_ventas: cantidadVentas,
+    cantidad_abonos: cantidadAbonos,
   };
 }
 
@@ -82,9 +101,9 @@ router.post('/', async (req, res) => {
 
   const { rows } = await pool.query(
     `INSERT INTO cortes_caja (sucursal_id, usuario_id, turno_inicio, turno_fin, fondo_inicial, total_efectivo, total_tarjeta, total_credito, total_sistema, diferencia)
-     VALUES ($1, $2, COALESCE($3::timestamptz, date_trunc('day', now())), now(), $4, $5, $6, 0, $7, $8)
+     VALUES ($1, $2, COALESCE($3::timestamptz, date_trunc('day', now())), now(), $4, $5, $6, $7, $8, $9)
      RETURNING id, turno_inicio, turno_fin, fondo_inicial, total_efectivo, total_tarjeta, total_credito, total_sistema, diferencia`,
-    [sucursal_id, req.usuario.sub, resumen.turno_inicio, fondo, resumen.total_efectivo, resumen.total_tarjeta, resumen.total_sistema, diferencia]
+    [sucursal_id, req.usuario.sub, resumen.turno_inicio, fondo, resumen.total_efectivo, resumen.total_tarjeta, resumen.total_credito, resumen.total_sistema, diferencia]
   );
 
   res.status(201).json(rows[0]);
