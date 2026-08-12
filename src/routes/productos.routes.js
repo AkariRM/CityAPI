@@ -127,8 +127,12 @@ router.post('/', requireRole('admin', 'vendedor'), async (req, res) => {
 });
 
 router.patch('/:id', requireRole('admin', 'vendedor'), async (req, res) => {
+  if (req.body?.tipo !== undefined && !['nuevo', 'usado', 'accesorio', 'servicio'].includes(req.body.tipo)) {
+    return res.status(400).json({ error: 'Tipo inválido.' });
+  }
   const fields = {
     nombre: req.body?.nombre,
+    tipo: req.body?.tipo,
     categoria_id: req.body?.categoria_id,
     precio_venta: req.body?.precio_venta,
     costo: req.body?.costo,
