@@ -34,7 +34,8 @@ CREATE TYPE rol_usuario AS ENUM ('admin', 'vendedor', 'tecnico', 'community_mana
 CREATE TYPE metodo_pago AS ENUM ('efectivo', 'tarjeta', 'credito');
 CREATE TYPE estado_venta AS ENUM ('completada', 'cancelada');
 CREATE TYPE tipo_producto AS ENUM ('nuevo', 'usado', 'accesorio', 'servicio');
-CREATE TYPE estado_unidad_imei AS ENUM ('disponible', 'vendido', 'en_garantia', 'en_reparacion', 'baja');
+CREATE TYPE estado_unidad_imei AS ENUM ('disponible', 'apartado', 'vendido', 'en_garantia', 'en_reparacion', 'baja');
+CREATE TYPE estado_apartado AS ENUM ('activo', 'completado', 'cancelado');
 CREATE TYPE tipo_movimiento_inventario AS ENUM ('entrada', 'salida', 'ajuste', 'traspaso');
 CREATE TYPE estado_credito AS ENUM ('activo', 'pagado', 'vencido', 'cancelado');
 CREATE TYPE estado_reparacion AS ENUM ('recibido', 'diagnostico', 'reparacion', 'listo', 'entregado');
@@ -181,6 +182,7 @@ CREATE TABLE inventario (
   producto_id     uuid NOT NULL REFERENCES productos(id),
   sucursal_id     uuid NOT NULL REFERENCES sucursales(id),
   stock_cantidad  integer NOT NULL DEFAULT 0 CHECK (stock_cantidad >= 0),
+  stock_apartado  integer NOT NULL DEFAULT 0 CHECK (stock_apartado >= 0),
   stock_minimo    integer NOT NULL DEFAULT 0,
   updated_at      timestamptz NOT NULL DEFAULT now(),
   PRIMARY KEY (producto_id, sucursal_id)
@@ -201,6 +203,43 @@ CREATE TABLE unidades_imei (
 );
 CREATE INDEX idx_unidades_imei_producto ON unidades_imei(producto_id, sucursal_id);
 CREATE INDEX idx_unidades_imei_estado ON unidades_imei(estado);
+
+-- Apartados: reservar N unidades de un producto (o una unidad IMEI puntual)
+-- para un cliente, con un anticipo opcional. Mientras esta 'activo', esa
+-- cantidad se resta de lo "disponible para vender" via inventario.stock_apartado,
+-- pero sigue contando en stock_cantidad (el producto no ha salido de la
+-- tienda). Al completarse SI sale de la tienda: se libera el apartado Y se
+-- descuenta stock_cantidad — sin generar una venta formal (el cobro, si
+-- faltaba algo, ya se registro como abono antes de completar).
+CREATE SEQUENCE apartados_folio_seq;
+CREATE TABLE apartados (
+  id              uuid PRIMARY KEY DEFAULT gen_random_uuid(),
+  folio           text NOT NULL UNIQUE DEFAULT ('AP-' || lpad(nextval('apartados_folio_seq')::text, 6, '0')),
+  cliente_id      uuid NOT NULL REFERENCES clientes(id),
+  sucursal_id     uuid NOT NULL REFERENCES sucursales(id),
+  producto_id     uuid NOT NULL REFERENCES productos(id),
+  unidad_imei_id  uuid REFERENCES unidades_imei(id),
+  cantidad        integer NOT NULL DEFAULT 1 CHECK (cantidad > 0),
+  precio_total    numeric(12,2) NOT NULL,
+  monto_abonado   numeric(12,2) NOT NULL DEFAULT 0,
+  estado          estado_apartado NOT NULL DEFAULT 'activo',
+  usuario_id      uuid NOT NULL REFERENCES usuarios(id),
+  created_at      timestamptz NOT NULL DEFAULT now(),
+  updated_at      timestamptz NOT NULL DEFAULT now()
+);
+CREATE INDEX idx_apartados_cliente ON apartados(cliente_id);
+CREATE INDEX idx_apartados_producto ON apartados(producto_id, sucursal_id);
+CREATE INDEX idx_apartados_estado ON apartados(estado);
+
+CREATE TABLE apartado_abonos (
+  id            uuid PRIMARY KEY DEFAULT gen_random_uuid(),
+  apartado_id   uuid NOT NULL REFERENCES apartados(id),
+  monto         numeric(12,2) NOT NULL,
+  metodo        metodo_pago NOT NULL,
+  usuario_id    uuid NOT NULL REFERENCES usuarios(id),
+  created_at    timestamptz NOT NULL DEFAULT now()
+);
+CREATE INDEX idx_apartado_abonos_apartado ON apartado_abonos(apartado_id);
 
 -- Kardex: historial de entradas/salidas/ajustes/traspasos de inventario.
 CREATE TABLE movimientos_inventario (
@@ -632,6 +671,8 @@ CREATE TRIGGER trg_productos_updated_at BEFORE UPDATE ON productos
 CREATE TRIGGER trg_inventario_updated_at BEFORE UPDATE ON inventario
   FOR EACH ROW EXECUTE FUNCTION set_updated_at();
 CREATE TRIGGER trg_unidades_imei_updated_at BEFORE UPDATE ON unidades_imei
+  FOR EACH ROW EXECUTE FUNCTION set_updated_at();
+CREATE TRIGGER trg_apartados_updated_at BEFORE UPDATE ON apartados
   FOR EACH ROW EXECUTE FUNCTION set_updated_at();
 CREATE TRIGGER trg_creditos_updated_at BEFORE UPDATE ON creditos
   FOR EACH ROW EXECUTE FUNCTION set_updated_at();

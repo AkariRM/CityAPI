@@ -23,12 +23,20 @@ async function calcularResumen(sucursal_id, usuario_id) {
     [sucursal_id, usuario_id, desde]
   );
 
-  // Un abono de credito es dinero real que entra a la caja de quien lo
-  // cobra (aunque la venta original haya sido de otro turno u otro
-  // vendedor), asi que cuenta igual que una venta en efectivo/tarjeta.
+  // Un abono de credito o de apartado es dinero real que entra a la caja de
+  // quien lo cobra (aunque el credito/apartado original sea de otro turno u
+  // otro vendedor), asi que cuenta igual que una venta en efectivo/tarjeta.
   const abonosPorMetodo = await pool.query(
     `SELECT metodo, count(*)::int AS cantidad, COALESCE(sum(monto), 0) AS total
      FROM abonos
+     WHERE usuario_id = $1
+       AND created_at > COALESCE($2::timestamptz, date_trunc('day', now()))
+     GROUP BY metodo`,
+    [usuario_id, desde]
+  );
+  const abonosApartadoPorMetodo = await pool.query(
+    `SELECT metodo, count(*)::int AS cantidad, COALESCE(sum(monto), 0) AS total
+     FROM apartado_abonos
      WHERE usuario_id = $1
        AND created_at > COALESCE($2::timestamptz, date_trunc('day', now()))
      GROUP BY metodo`,
@@ -43,6 +51,10 @@ async function calcularResumen(sucursal_id, usuario_id) {
   }
   let cantidadAbonos = 0;
   for (const row of abonosPorMetodo.rows) {
+    totales[row.metodo] += Number(row.total);
+    cantidadAbonos += row.cantidad;
+  }
+  for (const row of abonosApartadoPorMetodo.rows) {
     totales[row.metodo] += Number(row.total);
     cantidadAbonos += row.cantidad;
   }

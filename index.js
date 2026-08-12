@@ -32,6 +32,7 @@ const conversacionesRoutes = require('./src/routes/conversaciones.routes');
 const comentariosRoutes = require('./src/routes/comentarios.routes');
 const uploadsRoutes = require('./src/routes/uploads.routes');
 const creditosRoutes = require('./src/routes/creditos.routes');
+const apartadosRoutes = require('./src/routes/apartados.routes');
 
 const app = express();
 
@@ -101,6 +102,7 @@ app.use('/conversaciones', conversacionesRoutes);
 app.use('/comentarios', comentariosRoutes);
 app.use('/uploads', uploadsRoutes);
 app.use('/creditos', creditosRoutes);
+app.use('/apartados', apartadosRoutes);
 
 app.use((req, res) => {
   res.status(404).json({ error: 'Ruta no encontrada.' });

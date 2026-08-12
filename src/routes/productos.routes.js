@@ -31,7 +31,8 @@ router.get('/', requireRole('admin', 'vendedor', 'tecnico', 'community_manager')
             (pe_cliente.precio IS NOT NULL OR pe_rol.precio IS NOT NULL) AS precio_especial,
             p.imagen_url, p.categoria_id, c.nombre AS categoria_nombre,
             p.proveedor_id, pv.nombre AS proveedor_nombre,
-            COALESCE(i.stock_cantidad, 0) AS stock, COALESCE(i.stock_minimo, 0) AS stock_minimo
+            COALESCE(i.stock_cantidad, 0) AS stock, COALESCE(i.stock_minimo, 0) AS stock_minimo,
+            COALESCE(i.stock_apartado, 0) AS stock_apartado
      FROM productos p
      LEFT JOIN categorias c ON c.id = p.categoria_id
      LEFT JOIN proveedores pv ON pv.id = p.proveedor_id
