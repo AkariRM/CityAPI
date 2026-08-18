@@ -30,6 +30,25 @@ router.get('/', async (req, res) => {
   res.json(rows);
 });
 
+// Trae los abonos de una lista de creditos/apartados en una sola consulta
+// (evita N+1) y los agrupa en memoria por el id del padre.
+async function abonosAgrupados(tabla, columnaPadre, idsPadre) {
+  if (idsPadre.length === 0) return new Map();
+  const { rows } = await pool.query(
+    `SELECT a.${columnaPadre} AS padre_id, a.id, a.monto, a.metodo, a.created_at, u.nombre AS usuario_nombre
+     FROM ${tabla} a LEFT JOIN usuarios u ON u.id = a.usuario_id
+     WHERE a.${columnaPadre} = ANY($1::uuid[])
+     ORDER BY a.created_at DESC`,
+    [idsPadre]
+  );
+  const porPadre = new Map();
+  for (const row of rows) {
+    if (!porPadre.has(row.padre_id)) porPadre.set(row.padre_id, []);
+    porPadre.get(row.padre_id).push(row);
+  }
+  return porPadre;
+}
+
 router.get('/:id', async (req, res) => {
   const { rows } = await pool.query(`SELECT id, nombre, telefono, email, direccion, notas, created_at FROM clientes WHERE id = $1`, [req.params.id]);
   const cliente = rows[0];
@@ -41,7 +60,31 @@ router.get('/:id', async (req, res) => {
     [req.params.id]
   );
 
-  res.json({ ...cliente, ...historial.rows[0] });
+  const creditos = await pool.query(
+    `SELECT c.id, c.monto_total, c.saldo_pendiente, c.limite_aprobado, c.condiciones, c.estado, c.created_at,
+            u.nombre AS autorizado_por_nombre
+     FROM creditos c LEFT JOIN usuarios u ON u.id = c.autorizado_por
+     WHERE c.cliente_id = $1
+     ORDER BY c.created_at DESC`,
+    [req.params.id]
+  );
+  const abonosPorCredito = await abonosAgrupados('abonos', 'credito_id', creditos.rows.map((c) => c.id));
+
+  const apartados = await pool.query(
+    `SELECT a.id, a.folio, a.producto_id, p.nombre AS producto_nombre, a.cantidad, a.precio_total, a.monto_abonado, a.estado, a.created_at
+     FROM apartados a JOIN productos p ON p.id = a.producto_id
+     WHERE a.cliente_id = $1
+     ORDER BY a.created_at DESC`,
+    [req.params.id]
+  );
+  const abonosPorApartado = await abonosAgrupados('apartado_abonos', 'apartado_id', apartados.rows.map((a) => a.id));
+
+  res.json({
+    ...cliente,
+    ...historial.rows[0],
+    creditos: creditos.rows.map((c) => ({ ...c, abonos: abonosPorCredito.get(c.id) ?? [] })),
+    apartados: apartados.rows.map((a) => ({ ...a, abonos: abonosPorApartado.get(a.id) ?? [] })),
+  });
 });
 
 router.post('/', async (req, res) => {
