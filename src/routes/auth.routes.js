@@ -46,7 +46,10 @@ router.post('/login', loginLimiter, async (req, res) => {
     return res.status(400).json({ error: 'usuario_id y pin son requeridos.' });
   }
 
-  const { rows } = await pool.query('SELECT * FROM usuarios WHERE id = $1 AND activo = true', [usuario_id]);
+  const { rows } = await pool.query(
+    `SELECT u.*, s.nombre AS sucursal_nombre FROM usuarios u LEFT JOIN sucursales s ON s.id = u.sucursal_id WHERE u.id = $1 AND u.activo = true`,
+    [usuario_id]
+  );
   const usuario = rows[0];
   if (!usuario) return res.status(404).json({ error: 'Usuario no encontrado.' });
 
@@ -80,6 +83,7 @@ router.post('/login', loginLimiter, async (req, res) => {
       nombre: usuario.nombre,
       rol: usuario.rol,
       sucursal_id: usuario.sucursal_id,
+      sucursal_nombre: usuario.sucursal_nombre,
     },
   });
 });
