@@ -14,7 +14,7 @@ const PRIORIDADES_VALIDAS = ['baja', 'media', 'alta'];
 // IMPORTANTE: esta ruta especifica va ANTES de "/:id" para que Express no la
 // confunda con una busqueda por id (que fallaria con "reporte" como uuid).
 router.get('/refacciones/reporte', async (req, res) => {
-  const { desde, hasta } = req.query;
+  const { desde, hasta, sucursal_id } = req.query;
   const { rows } = await pool.query(
     `SELECT rr.id, r.folio, rr.producto_id, p.nombre AS producto_nombre, rr.cantidad, rr.costo, r.created_at AS fecha
      FROM reparacion_refacciones rr
@@ -22,8 +22,9 @@ router.get('/refacciones/reporte', async (req, res) => {
      JOIN productos p ON p.id = rr.producto_id
      WHERE ($1::timestamptz IS NULL OR r.created_at >= $1::timestamptz)
        AND ($2::timestamptz IS NULL OR r.created_at < $2::timestamptz)
+       AND ($3::uuid IS NULL OR r.sucursal_id = $3::uuid)
      ORDER BY r.created_at DESC`,
-    [desde ? inicioDiaUTC(desde) : null, hasta ? finDiaUTCExclusivo(hasta) : null]
+    [desde ? inicioDiaUTC(desde) : null, hasta ? finDiaUTCExclusivo(hasta) : null, sucursal_id || null]
   );
   res.json(rows);
 });

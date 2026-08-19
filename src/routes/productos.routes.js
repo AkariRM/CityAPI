@@ -13,7 +13,9 @@ router.use(requireAuth);
 // edicion, stock, IMEI) siguen restringidas a quienes administran el catalogo.
 router.get('/', requireRole('admin', 'vendedor', 'tecnico', 'community_manager'), async (req, res) => {
   const { sucursal_id, q, categoria_id, tipo, cliente_id, activo } = req.query;
-  if (!sucursal_id) return res.status(400).json({ error: 'sucursal_id es requerido.' });
+  // Solo el admin puede omitir sucursal_id (ve "Todas las sucursales" con el
+  // stock sumado); los demas roles lo siguen necesitando, igual que siempre.
+  if (!sucursal_id && req.usuario.rol !== 'admin') return res.status(400).json({ error: 'sucursal_id es requerido.' });
 
   const tipos = tipo ? tipo.split(',').map((t) => t.trim()) : null;
   const activoFiltro = activo === undefined ? true : activo === 'true';
@@ -36,7 +38,11 @@ router.get('/', requireRole('admin', 'vendedor', 'tecnico', 'community_manager')
      FROM productos p
      LEFT JOIN categorias c ON c.id = p.categoria_id
      LEFT JOIN proveedores pv ON pv.id = p.proveedor_id
-     LEFT JOIN inventario i ON i.producto_id = p.id AND i.sucursal_id = $1
+     LEFT JOIN LATERAL (
+       SELECT SUM(inv.stock_cantidad)::int AS stock_cantidad, SUM(inv.stock_minimo)::int AS stock_minimo, SUM(inv.stock_apartado)::int AS stock_apartado
+       FROM inventario inv
+       WHERE inv.producto_id = p.id AND ($1::uuid IS NULL OR inv.sucursal_id = $1::uuid)
+     ) i ON true
      LEFT JOIN precios_especiales pe_cliente ON pe_cliente.producto_id = p.id AND pe_cliente.cliente_id = $5::uuid
      LEFT JOIN precios_especiales pe_rol ON pe_rol.producto_id = p.id AND pe_rol.rol = $6::rol_usuario
      WHERE p.activo = $7::boolean
@@ -44,7 +50,7 @@ router.get('/', requireRole('admin', 'vendedor', 'tecnico', 'community_manager')
        AND ($3::text IS NULL OR p.nombre ILIKE '%' || $3 || '%')
        AND ($4::text[] IS NULL OR p.tipo::text = ANY($4::text[]))
      ORDER BY p.nombre`,
-    [sucursal_id, categoria_id || null, q || null, tipos, cliente_id || null, req.usuario.rol, activoFiltro]
+    [sucursal_id || null, categoria_id || null, q || null, tipos, cliente_id || null, req.usuario.rol, activoFiltro]
   );
   res.json(rows);
 });
