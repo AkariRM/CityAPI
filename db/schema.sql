@@ -321,14 +321,20 @@ CREATE INDEX idx_venta_items_producto ON venta_items(producto_id);
 CREATE UNIQUE INDEX idx_venta_items_unidad_imei_unica ON venta_items(unidad_imei_id) WHERE unidad_imei_id IS NOT NULL;
 
 CREATE TABLE cambios (
-  id                    uuid PRIMARY KEY DEFAULT gen_random_uuid(),
-  venta_original_id     uuid NOT NULL REFERENCES ventas(id),
-  producto_devuelto_id  uuid NOT NULL REFERENCES productos(id),
-  producto_nuevo_id     uuid REFERENCES productos(id),
-  diferencia            numeric(12,2) NOT NULL DEFAULT 0,
-  motivo                text,
-  usuario_id            uuid NOT NULL REFERENCES usuarios(id),
-  created_at            timestamptz NOT NULL DEFAULT now()
+  id                        uuid PRIMARY KEY DEFAULT gen_random_uuid(),
+  venta_original_id         uuid NOT NULL REFERENCES ventas(id),
+  producto_devuelto_id      uuid NOT NULL REFERENCES productos(id),
+  producto_nuevo_id         uuid REFERENCES productos(id),
+  -- Cuando el cambio es de un celular con IMEI, guarda la unidad exacta que
+  -- se devolvio y la que se entrego (si aplica), para poder rastrear el
+  -- reemplazo en el registro de garantias. Opcionales: un cambio de
+  -- accesorio/producto sin IMEI no las usa.
+  unidad_imei_devuelta_id   uuid REFERENCES unidades_imei(id),
+  unidad_imei_nueva_id      uuid REFERENCES unidades_imei(id),
+  diferencia                numeric(12,2) NOT NULL DEFAULT 0,
+  motivo                    text,
+  usuario_id                uuid NOT NULL REFERENCES usuarios(id),
+  created_at                timestamptz NOT NULL DEFAULT now()
 );
 CREATE INDEX idx_cambios_venta ON cambios(venta_original_id);
 

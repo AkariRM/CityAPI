@@ -7,7 +7,7 @@ const router = express.Router();
 router.use(requireAuth, requireRole('admin', 'vendedor'));
 
 router.post('/', async (req, res) => {
-  const { venta_original_id, producto_devuelto_id, producto_nuevo_id, motivo } = req.body ?? {};
+  const { venta_original_id, producto_devuelto_id, producto_nuevo_id, unidad_imei_nueva_id, motivo } = req.body ?? {};
   if (!venta_original_id || !producto_devuelto_id) {
     return res.status(400).json({ error: 'venta_original_id y producto_devuelto_id son requeridos.' });
   }
@@ -21,11 +21,15 @@ router.post('/', async (req, res) => {
     if (!venta) throw Object.assign(new Error('La venta original no existe.'), { statusCode: 404 });
 
     const itemResult = await client.query(
-      `SELECT precio_unitario FROM venta_items WHERE venta_id = $1 AND producto_id = $2 LIMIT 1`,
+      `SELECT precio_unitario, unidad_imei_id FROM venta_items WHERE venta_id = $1 AND producto_id = $2 LIMIT 1`,
       [venta_original_id, producto_devuelto_id]
     );
     const itemDevuelto = itemResult.rows[0];
     if (!itemDevuelto) throw Object.assign(new Error('Ese producto no pertenece a la venta original.'), { statusCode: 400 });
+    // La unidad devuelta se toma siempre de la venta original, nunca de lo
+    // que mande el cliente — es la unica forma de garantizar que coincide
+    // con el equipo que realmente se vendio.
+    const unidadImeiDevuelta = itemDevuelto.unidad_imei_id || null;
 
     let precioNuevo = 0;
     if (producto_nuevo_id) {
@@ -42,13 +46,26 @@ router.post('/', async (req, res) => {
       precioNuevo = Number(row.precio_venta);
     }
 
+    let unidadImeiNueva = null;
+    if (producto_nuevo_id && unidad_imei_nueva_id) {
+      const unidadNueva = await client.query(
+        `SELECT estado FROM unidades_imei WHERE id = $1 AND producto_id = $2 AND sucursal_id = $3 FOR UPDATE`,
+        [unidad_imei_nueva_id, producto_nuevo_id, venta.sucursal_id]
+      );
+      if (!unidadNueva.rows[0]) throw Object.assign(new Error('La unidad IMEI seleccionada para el producto nuevo no existe.'), { statusCode: 400 });
+      if (unidadNueva.rows[0].estado !== 'disponible') {
+        throw Object.assign(new Error('Esa unidad ya no está disponible.'), { statusCode: 409 });
+      }
+      unidadImeiNueva = unidad_imei_nueva_id;
+    }
+
     const diferencia = precioNuevo - Number(itemDevuelto.precio_unitario);
 
     const cambioResult = await client.query(
-      `INSERT INTO cambios (venta_original_id, producto_devuelto_id, producto_nuevo_id, diferencia, motivo, usuario_id)
-       VALUES ($1, $2, $3, $4, $5, $6)
+      `INSERT INTO cambios (venta_original_id, producto_devuelto_id, producto_nuevo_id, unidad_imei_devuelta_id, unidad_imei_nueva_id, diferencia, motivo, usuario_id)
+       VALUES ($1, $2, $3, $4, $5, $6, $7, $8)
        RETURNING id, diferencia, created_at`,
-      [venta_original_id, producto_devuelto_id, producto_nuevo_id || null, diferencia, motivo || null, req.usuario.sub]
+      [venta_original_id, producto_devuelto_id, producto_nuevo_id || null, unidadImeiDevuelta, unidadImeiNueva, diferencia, motivo || null, req.usuario.sub]
     );
     const cambio = cambioResult.rows[0];
 
@@ -63,6 +80,9 @@ router.post('/', async (req, res) => {
        VALUES ($1, $2, 'entrada', 1, 'Cambio - producto devuelto', 'cambio', $3, $4)`,
       [producto_devuelto_id, venta.sucursal_id, cambio.id, req.usuario.sub]
     );
+    if (unidadImeiDevuelta) {
+      await client.query(`UPDATE unidades_imei SET estado = 'disponible', updated_at = now() WHERE id = $1`, [unidadImeiDevuelta]);
+    }
 
     if (producto_nuevo_id) {
       await client.query(
@@ -74,6 +94,9 @@ router.post('/', async (req, res) => {
          VALUES ($1, $2, 'salida', 1, 'Cambio - producto nuevo entregado', 'cambio', $3, $4)`,
         [producto_nuevo_id, venta.sucursal_id, cambio.id, req.usuario.sub]
       );
+      if (unidadImeiNueva) {
+        await client.query(`UPDATE unidades_imei SET estado = 'vendido', updated_at = now() WHERE id = $1`, [unidadImeiNueva]);
+      }
     }
 
     await client.query('COMMIT');

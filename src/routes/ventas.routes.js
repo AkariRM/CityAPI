@@ -195,6 +195,21 @@ router.post('/', async (req, res) => {
       if (!stockRow || stockRow.stock_cantidad < item.cantidad) {
         throw Object.assign(new Error(`Stock insuficiente para "${producto.rows[0].nombre}".`), { statusCode: 409 });
       }
+
+      if (item.unidad_imei_id) {
+        // Una unidad serializada se vende de una en una — nunca en cantidad.
+        if (item.cantidad !== 1) {
+          throw Object.assign(new Error(`"${producto.rows[0].nombre}" con IMEI solo puede venderse de 1 en 1.`), { statusCode: 400 });
+        }
+        const unidad = await client.query(
+          `SELECT estado FROM unidades_imei WHERE id = $1 AND producto_id = $2 AND sucursal_id = $3 FOR UPDATE`,
+          [item.unidad_imei_id, item.producto_id, sucursal_id]
+        );
+        if (!unidad.rows[0]) throw Object.assign(new Error('La unidad IMEI seleccionada no existe.'), { statusCode: 400 });
+        if (unidad.rows[0].estado !== 'disponible') {
+          throw Object.assign(new Error(`Esa unidad de "${producto.rows[0].nombre}" ya no está disponible.`), { statusCode: 409 });
+        }
+      }
     }
 
     const subtotal = items.reduce((sum, i) => sum + i.cantidad * precios[i.producto_id], 0);
@@ -222,6 +237,10 @@ router.post('/', async (req, res) => {
          VALUES ($1, $2, $3, $4, $5, $6, $7)`,
         [venta.id, item.producto_id, item.unidad_imei_id || null, item.cantidad, precioUnitario, itemDescuento, itemSubtotal]
       );
+
+      if (item.unidad_imei_id) {
+        await client.query(`UPDATE unidades_imei SET estado = 'vendido', updated_at = now() WHERE id = $1`, [item.unidad_imei_id]);
+      }
 
       if (tipos[item.producto_id] === 'servicio') continue;
 
