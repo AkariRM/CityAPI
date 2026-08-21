@@ -603,9 +603,18 @@ CREATE TABLE nominas (
 );
 CREATE INDEX idx_nominas_usuario ON nominas(usuario_id);
 
+-- "Salida de caja": dinero que sale de la caja física, de dos tipos.
+-- 'gasto' es un costo real del negocio y SI cuenta en Finanzas/Utilidades
+-- (calcularResumenFinanciero solo suma tipo='gasto'). 'retiro' es solo un
+-- resguardo (ej. mover el efectivo de una venta grande a la caja fuerte) —
+-- resta de "efectivo esperado" en el corte de caja igual que un gasto, pero
+-- NO es un costo del negocio, asi que no se cuenta como gasto en ningun
+-- reporte financiero.
 CREATE TABLE gastos (
   id           uuid PRIMARY KEY DEFAULT gen_random_uuid(),
   sucursal_id  uuid REFERENCES sucursales(id),
+  usuario_id   uuid REFERENCES usuarios(id),
+  tipo         text NOT NULL DEFAULT 'gasto' CHECK (tipo IN ('gasto', 'retiro')),
   categoria    text NOT NULL,
   monto        numeric(12,2) NOT NULL,
   descripcion  text,

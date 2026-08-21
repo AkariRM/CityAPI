@@ -21,8 +21,12 @@ async function calcularResumenFinanciero(desde, hasta) {
     [desdeUTC, hastaUTC]
   );
 
+  // Solo 'gasto' es un costo real del negocio. 'retiro' (resguardo de
+  // efectivo, ej. mover a la caja fuerte el dinero de una venta grande) no
+  // cuenta aqui — ya se resto del efectivo esperado en el corte de caja, pero
+  // no le costo nada al negocio, seria doble conteo incluirlo tambien como gasto.
   const gastos = await pool.query(
-    `SELECT COALESCE(sum(monto), 0) AS valor FROM gastos WHERE fecha BETWEEN $1::date AND $2::date`,
+    `SELECT COALESCE(sum(monto), 0) AS valor FROM gastos WHERE tipo = 'gasto' AND fecha BETWEEN $1::date AND $2::date`,
     [desde, hasta]
   );
 

@@ -43,6 +43,20 @@ async function calcularResumen(sucursal_id, usuario_id) {
     [usuario_id, desde]
   );
 
+  // Salidas de caja del turno (gasto o retiro) — ambas restan del efectivo
+  // fisico esperado, aunque solo 'gasto' cuenta como costo del negocio en
+  // Finanzas (ver resumenFinanciero.js). 'usuario_id' aqui es quien registro
+  // la salida, no necesariamente el vendedor original de la venta.
+  const salidas = await pool.query(
+    `SELECT id, tipo, categoria, monto, descripcion, created_at
+     FROM gastos
+     WHERE sucursal_id = $1 AND usuario_id = $2
+       AND created_at > COALESCE($3::timestamptz, date_trunc('day', now()))
+     ORDER BY created_at`,
+    [sucursal_id, usuario_id, desde]
+  );
+  const totalSalidas = salidas.rows.reduce((sum, s) => sum + Number(s.monto), 0);
+
   const totales = { efectivo: 0, tarjeta: 0, credito: 0 };
   let cantidadVentas = 0;
   for (const row of ventasPorMetodo.rows) {
@@ -65,6 +79,8 @@ async function calcularResumen(sucursal_id, usuario_id) {
     total_tarjeta: totales.tarjeta,
     total_credito: totales.credito,
     total_sistema: totales.efectivo + totales.tarjeta,
+    total_salidas: totalSalidas,
+    salidas: salidas.rows,
     cantidad_ventas: cantidadVentas,
     cantidad_abonos: cantidadAbonos,
   };
@@ -109,7 +125,7 @@ router.post('/', async (req, res) => {
 
   const resumen = await calcularResumen(sucursal_id, req.usuario.sub);
   const fondo = fondo_inicial ?? 0;
-  const diferencia = efectivo_contado - (fondo + resumen.total_efectivo);
+  const diferencia = efectivo_contado - (fondo + resumen.total_efectivo - resumen.total_salidas);
 
   const { rows } = await pool.query(
     `INSERT INTO cortes_caja (sucursal_id, usuario_id, turno_inicio, turno_fin, fondo_inicial, total_efectivo, total_tarjeta, total_credito, total_sistema, diferencia)
