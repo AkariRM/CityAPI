@@ -35,6 +35,8 @@ const creditosRoutes = require('./src/routes/creditos.routes');
 const apartadosRoutes = require('./src/routes/apartados.routes');
 const busquedaRoutes = require('./src/routes/busqueda.routes');
 const celularesRoutes = require('./src/routes/celulares.routes');
+const aureaProductosRoutes = require('./src/routes/aureaProductos.routes');
+const aureaVentasRoutes = require('./src/routes/aureaVentas.routes');
 
 const app = express();
 
@@ -107,6 +109,8 @@ app.use('/creditos', creditosRoutes);
 app.use('/apartados', apartadosRoutes);
 app.use('/busqueda', busquedaRoutes);
 app.use('/celulares-vendidos', celularesRoutes);
+app.use('/aurea/productos', aureaProductosRoutes);
+app.use('/aurea/ventas', aureaVentasRoutes);
 
 app.use((req, res) => {
   res.status(404).json({ error: 'Ruta no encontrada.' });

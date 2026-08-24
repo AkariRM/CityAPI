@@ -18,12 +18,17 @@ async function requireAuth(req, res, next) {
   }
 
   try {
-    const { rows } = await pool.query('SELECT rol, activo FROM usuarios WHERE id = $1', [payload.sub]);
+    const { rows } = await pool.query(
+      `SELECT u.rol, u.activo, u.empresa_id, e.slug AS empresa_slug
+       FROM usuarios u LEFT JOIN empresas e ON e.id = u.empresa_id
+       WHERE u.id = $1`,
+      [payload.sub]
+    );
     const usuario = rows[0];
     if (!usuario || !usuario.activo) {
       return res.status(401).json({ error: 'Sesión inválida o expirada.' });
     }
-    req.usuario = { sub: payload.sub, rol: usuario.rol };
+    req.usuario = { sub: payload.sub, rol: usuario.rol, empresa_id: usuario.empresa_id, empresa_slug: usuario.empresa_slug };
     next();
   } catch (err) {
     console.error(err);
@@ -33,11 +38,26 @@ async function requireAuth(req, res, next) {
 
 function requireRole(...roles) {
   return (req, res, next) => {
-    if (!roles.includes(req.usuario?.rol)) {
+    const rol = req.usuario?.rol;
+    // 'dueño' es superior a 'admin' en la jerarquia (ve/opera ambas
+    // empresas) — cualquier ruta que acepte 'admin' debe dejarlo pasar
+    // tambien, sin tener que agregar 'dueño' a mano en cada una de las
+    // ~40 rutas que ya usaban requireRole('admin', ...).
+    const puedeComoDueno = rol === 'dueño' && roles.includes('admin');
+    if (!roles.includes(rol) && !puedeComoDueno) {
       return res.status(403).json({ error: 'No tienes permiso para esta acción.' });
     }
     next();
   };
 }
 
-module.exports = { requireAuth, requireRole };
+// 'dueño' siempre pasa (ve todas las empresas); cualquier otro rol solo si
+// su empresa asignada coincide con el slug pedido.
+function requireEmpresa(slug) {
+  return (req, res, next) => {
+    if (req.usuario?.rol === 'dueño' || req.usuario?.empresa_slug === slug) return next();
+    return res.status(403).json({ error: 'No tienes acceso a esta empresa.' });
+  };
+}
+
+module.exports = { requireAuth, requireRole, requireEmpresa };

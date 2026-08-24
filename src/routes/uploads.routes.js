@@ -5,7 +5,7 @@ const { createClient } = require('@supabase/supabase-js');
 const { requireAuth, requireRole } = require('../middleware/auth');
 
 const router = express.Router();
-router.use(requireAuth, requireRole('admin', 'vendedor'));
+router.use(requireAuth, requireRole('admin', 'vendedor', 'pto'));
 
 const BUCKET = 'Imagenes';
 const TIPOS_VALIDOS = { 'image/jpeg': 'jpg', 'image/png': 'png', 'image/webp': 'webp' };

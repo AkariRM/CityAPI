@@ -30,7 +30,11 @@ $$ LANGUAGE plpgsql;
 -- ENUMS
 -- ============================================================================
 
-CREATE TYPE rol_usuario AS ENUM ('admin', 'vendedor', 'tecnico', 'community_manager');
+-- 'dueño' es superior a 'admin': ve/opera todas las empresas siempre (a
+-- diferencia de 'admin', que queda asignado a una sola vía usuarios.empresa_id).
+-- 'pto' (Punto de Venta/Operador) es exclusivo de Áurea — vendedor+técnico
+-- de CityPhone no aplican ahí, es un rol operativo mucho más simple.
+CREATE TYPE rol_usuario AS ENUM ('dueño', 'admin', 'vendedor', 'tecnico', 'community_manager', 'pto');
 CREATE TYPE metodo_pago AS ENUM ('efectivo', 'tarjeta', 'credito');
 CREATE TYPE estado_venta AS ENUM ('completada', 'cancelada');
 CREATE TYPE tipo_producto AS ENUM ('nuevo', 'usado', 'accesorio', 'servicio');
@@ -55,8 +59,21 @@ CREATE TYPE estado_orden_compra AS ENUM ('pendiente', 'recibida');
 CREATE TYPE estado_comentario AS ENUM ('pendiente', 'respondido', 'descartado');
 
 -- ============================================================================
--- NUCLEO: sucursales, usuarios, sesiones, auditoria
+-- NUCLEO: empresas, sucursales, usuarios, sesiones, auditoria
 -- ============================================================================
+
+-- CityCorp: raiz multiempresa. CityPhone y Aurea comparten este mismo
+-- backend/DB pero cada quien con sus propias tablas de negocio (ver mas
+-- abajo "AUREA") — empresas solo sirve para el login/permisos, no hay
+-- ninguna FK desde productos/ventas/etc. de CityPhone hacia aqui.
+CREATE TABLE empresas (
+  id      uuid PRIMARY KEY DEFAULT gen_random_uuid(),
+  slug    text NOT NULL UNIQUE,
+  nombre  text NOT NULL,
+  activo  boolean NOT NULL DEFAULT true
+);
+-- Datos de sistema, no de demo: sin estas 2 filas no hay login posible.
+INSERT INTO empresas (slug, nombre) VALUES ('cityphone', 'CityPhone'), ('aurea', 'Áurea');
 
 CREATE TABLE sucursales (
   id          uuid PRIMARY KEY DEFAULT gen_random_uuid(),
@@ -69,22 +86,30 @@ CREATE TABLE sucursales (
 );
 
 CREATE TABLE usuarios (
-  id                uuid PRIMARY KEY DEFAULT gen_random_uuid(),
-  nombre            text NOT NULL,
-  telefono          text,
-  email             text UNIQUE,
-  rol               rol_usuario NOT NULL,
-  sucursal_id       uuid REFERENCES sucursales(id),
-  pin_hash          text NOT NULL,
-  intentos_fallidos smallint NOT NULL DEFAULT 0,
-  bloqueado_hasta   timestamptz,
-  avatar_color      text,
-  activo            boolean NOT NULL DEFAULT true,
-  created_at        timestamptz NOT NULL DEFAULT now(),
-  updated_at        timestamptz NOT NULL DEFAULT now()
+  id                    uuid PRIMARY KEY DEFAULT gen_random_uuid(),
+  nombre                text NOT NULL,
+  telefono              text,
+  email                 text UNIQUE,
+  rol                   rol_usuario NOT NULL,
+  -- NULL solo para 'dueño' (ve todas las empresas); obligatorio para
+  -- cualquier otro rol — a que empresa pertenece esta cuenta.
+  empresa_id            uuid REFERENCES empresas(id),
+  -- Solo se usa para 'dueño': recuerda la ultima empresa activa para que
+  -- la vea de entrada la proxima vez que inicie sesion, en cualquier
+  -- dispositivo (a diferencia de la sucursal, que se fija por dispositivo).
+  empresa_preferida_id  uuid REFERENCES empresas(id),
+  sucursal_id           uuid REFERENCES sucursales(id),
+  pin_hash              text NOT NULL,
+  intentos_fallidos     smallint NOT NULL DEFAULT 0,
+  bloqueado_hasta       timestamptz,
+  avatar_color          text,
+  activo                boolean NOT NULL DEFAULT true,
+  created_at            timestamptz NOT NULL DEFAULT now(),
+  updated_at            timestamptz NOT NULL DEFAULT now()
 );
 CREATE INDEX idx_usuarios_rol ON usuarios(rol);
 CREATE INDEX idx_usuarios_sucursal ON usuarios(sucursal_id);
+CREATE INDEX idx_usuarios_empresa ON usuarios(empresa_id);
 
 CREATE TABLE sesiones (
   id           uuid PRIMARY KEY DEFAULT gen_random_uuid(),
@@ -672,6 +697,49 @@ CREATE TABLE configuracion_ticket (
 );
 
 -- ============================================================================
+-- AUREA (segunda empresa de CityCorp — tienda de maquillaje/beauty/perfumes)
+-- Fase 1 deliberadamente minima: solo catalogo y ventas, nada de clientes,
+-- creditos, apartados, cambios, corte de caja ni sucursales todavia. Tablas
+-- totalmente separadas de las de CityPhone (ninguna FK cruzada) a proposito.
+-- ============================================================================
+
+CREATE TABLE aurea_productos (
+  id              uuid PRIMARY KEY DEFAULT gen_random_uuid(),
+  nombre          text NOT NULL,
+  categoria       text,
+  precio_venta    numeric(12,2) NOT NULL,
+  costo           numeric(12,2) NOT NULL DEFAULT 0,
+  stock_cantidad  integer NOT NULL DEFAULT 0,
+  imagen_url      text,
+  activo          boolean NOT NULL DEFAULT true,
+  created_at      timestamptz NOT NULL DEFAULT now(),
+  updated_at      timestamptz NOT NULL DEFAULT now()
+);
+CREATE INDEX idx_aurea_productos_activo ON aurea_productos(activo);
+
+CREATE SEQUENCE aurea_ventas_folio_seq;
+CREATE TABLE aurea_ventas (
+  id           uuid PRIMARY KEY DEFAULT gen_random_uuid(),
+  folio        text NOT NULL UNIQUE DEFAULT ('AU-' || lpad(nextval('aurea_ventas_folio_seq')::text, 6, '0')),
+  usuario_id   uuid NOT NULL REFERENCES usuarios(id),
+  metodo_pago  metodo_pago NOT NULL,
+  subtotal     numeric(12,2) NOT NULL,
+  total        numeric(12,2) NOT NULL,
+  created_at   timestamptz NOT NULL DEFAULT now()
+);
+CREATE INDEX idx_aurea_ventas_usuario ON aurea_ventas(usuario_id);
+
+CREATE TABLE aurea_venta_items (
+  id               uuid PRIMARY KEY DEFAULT gen_random_uuid(),
+  venta_id         uuid NOT NULL REFERENCES aurea_ventas(id) ON DELETE CASCADE,
+  producto_id      uuid NOT NULL REFERENCES aurea_productos(id),
+  cantidad         integer NOT NULL CHECK (cantidad > 0),
+  precio_unitario  numeric(12,2) NOT NULL,
+  subtotal         numeric(12,2) NOT NULL
+);
+CREATE INDEX idx_aurea_venta_items_venta ON aurea_venta_items(venta_id);
+
+-- ============================================================================
 -- TRIGGERS updated_at
 -- ============================================================================
 
@@ -700,4 +768,6 @@ CREATE TRIGGER trg_publicaciones_updated_at BEFORE UPDATE ON publicaciones
 CREATE TRIGGER trg_marketplace_listados_updated_at BEFORE UPDATE ON marketplace_listados
   FOR EACH ROW EXECUTE FUNCTION set_updated_at();
 CREATE TRIGGER trg_configuracion_ticket_updated_at BEFORE UPDATE ON configuracion_ticket
+  FOR EACH ROW EXECUTE FUNCTION set_updated_at();
+CREATE TRIGGER trg_aurea_productos_updated_at BEFORE UPDATE ON aurea_productos
   FOR EACH ROW EXECUTE FUNCTION set_updated_at();

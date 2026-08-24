@@ -4,43 +4,63 @@ const { requireAuth, requireRole } = require('../middleware/auth');
 const { isValidPin, hashPin } = require('../utils/pin');
 
 const router = express.Router();
-const ROLES_VALIDOS = ['admin', 'vendedor', 'tecnico', 'community_manager'];
+const ROLES_VALIDOS = ['dueño', 'admin', 'vendedor', 'tecnico', 'community_manager', 'pto'];
+// Solo estos roles pertenecen a CityPhone y necesitan sucursal — 'dueño' no
+// se ata a ninguna empresa/sucursal, 'pto' es de Áurea (sin sucursales fase 1).
+const ROLES_CITYPHONE_CON_SUCURSAL = ['admin', 'vendedor', 'tecnico', 'community_manager'];
 
-router.use(requireAuth, requireRole('admin'));
+router.use(requireAuth, requireRole('dueño', 'admin'));
 
 router.get('/', async (req, res) => {
   const { rows } = await pool.query(
-    `SELECT u.id, u.nombre, u.telefono, u.email, u.rol, u.sucursal_id,
-            s.nombre AS sucursal_nombre, u.activo, u.created_at
+    `SELECT u.id, u.nombre, u.telefono, u.email, u.rol, u.sucursal_id, u.empresa_id,
+            s.nombre AS sucursal_nombre, e.nombre AS empresa_nombre, u.activo, u.created_at
      FROM usuarios u
      LEFT JOIN sucursales s ON s.id = u.sucursal_id
+     LEFT JOIN empresas e ON e.id = u.empresa_id
      ORDER BY u.nombre`
   );
   res.json(rows);
 });
 
 router.post('/', async (req, res) => {
-  const { nombre, telefono, email, rol, sucursal_id, pin } = req.body ?? {};
+  const { nombre, telefono, email, rol, sucursal_id, empresa_id, pin } = req.body ?? {};
 
   if (!nombre?.trim()) return res.status(400).json({ error: 'El nombre es requerido.' });
   if (!ROLES_VALIDOS.includes(rol)) return res.status(400).json({ error: 'Rol inválido.' });
-  if (!sucursal_id) return res.status(400).json({ error: 'La sucursal es requerida.' });
   if (!isValidPin(pin)) return res.status(400).json({ error: 'El PIN debe ser de 4 dígitos.' });
 
+  // Asignar acceso de Dueño o Admin (osea, a una empresa completa) es
+  // decisión exclusiva del Dueño — un Admin normal no puede crear otro
+  // Admin ni ascender a Dueño.
+  if ((rol === 'dueño' || rol === 'admin') && req.usuario.rol !== 'dueño') {
+    return res.status(403).json({ error: 'Solo el Dueño puede crear cuentas de Dueño o Admin.' });
+  }
+
+  if (rol !== 'dueño' && !empresa_id) {
+    return res.status(400).json({ error: 'La empresa es requerida.' });
+  }
+  if (ROLES_CITYPHONE_CON_SUCURSAL.includes(rol) && !sucursal_id) {
+    return res.status(400).json({ error: 'La sucursal es requerida.' });
+  }
+
   const { rows } = await pool.query(
-    `INSERT INTO usuarios (nombre, telefono, email, rol, sucursal_id, pin_hash)
-     VALUES ($1, $2, $3, $4, $5, $6)
-     RETURNING id, nombre, telefono, email, rol, sucursal_id, activo, created_at`,
-    [nombre.trim(), telefono || null, email || null, rol, sucursal_id, hashPin(pin)]
+    `INSERT INTO usuarios (nombre, telefono, email, rol, sucursal_id, empresa_id, pin_hash)
+     VALUES ($1, $2, $3, $4, $5, $6, $7)
+     RETURNING id, nombre, telefono, email, rol, sucursal_id, empresa_id, activo, created_at`,
+    [nombre.trim(), telefono || null, email || null, rol, rol === 'dueño' ? null : sucursal_id || null, rol === 'dueño' ? null : empresa_id, hashPin(pin)]
   );
   res.status(201).json(rows[0]);
 });
 
 router.patch('/:id', async (req, res) => {
-  const { nombre, telefono, email, rol, sucursal_id, activo } = req.body ?? {};
+  const { nombre, telefono, email, rol, sucursal_id, empresa_id, activo } = req.body ?? {};
   if (rol && !ROLES_VALIDOS.includes(rol)) return res.status(400).json({ error: 'Rol inválido.' });
+  if (rol && (rol === 'dueño' || rol === 'admin') && req.usuario.rol !== 'dueño') {
+    return res.status(403).json({ error: 'Solo el Dueño puede asignar Dueño o Admin.' });
+  }
 
-  const fields = { nombre, telefono, email, rol, sucursal_id, activo };
+  const fields = { nombre, telefono, email, rol, sucursal_id, empresa_id, activo };
   const sets = [];
   const values = [];
   let i = 1;
@@ -55,7 +75,7 @@ router.patch('/:id', async (req, res) => {
   values.push(req.params.id);
   const { rows } = await pool.query(
     `UPDATE usuarios SET ${sets.join(', ')} WHERE id = $${i}
-     RETURNING id, nombre, telefono, email, rol, sucursal_id, activo, created_at`,
+     RETURNING id, nombre, telefono, email, rol, sucursal_id, empresa_id, activo, created_at`,
     values
   );
   if (!rows[0]) return res.status(404).json({ error: 'Usuario no encontrado.' });
