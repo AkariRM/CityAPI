@@ -1,6 +1,6 @@
 const express = require('express');
 const { pool } = require('../db');
-const { requireAuth, requireRole } = require('../middleware/auth');
+const { requireAuth, requireRole, esAdminODueno } = require('../middleware/auth');
 const { inicioDiaUTC, finDiaUTCExclusivo } = require('../utils/fechas');
 
 const router = express.Router();
@@ -13,9 +13,9 @@ router.use(requireAuth);
 // edicion, stock, IMEI) siguen restringidas a quienes administran el catalogo.
 router.get('/', requireRole('admin', 'vendedor', 'tecnico', 'community_manager'), async (req, res) => {
   const { sucursal_id, q, categoria_id, tipo, cliente_id, activo } = req.query;
-  // Solo el admin puede omitir sucursal_id (ve "Todas las sucursales" con el
-  // stock sumado); los demas roles lo siguen necesitando, igual que siempre.
-  if (!sucursal_id && req.usuario.rol !== 'admin') return res.status(400).json({ error: 'sucursal_id es requerido.' });
+  // Admin y dueño pueden omitir sucursal_id (ven "Todas las sucursales" con
+  // el stock sumado); los demas roles lo siguen necesitando, igual que siempre.
+  if (!sucursal_id && !esAdminODueno(req.usuario.rol)) return res.status(400).json({ error: 'sucursal_id es requerido.' });
 
   const tipos = tipo ? tipo.split(',').map((t) => t.trim()) : null;
   const activoFiltro = activo === undefined ? true : activo === 'true';

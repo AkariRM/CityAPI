@@ -1,6 +1,6 @@
 const express = require('express');
 const { pool } = require('../db');
-const { requireAuth, requireRole } = require('../middleware/auth');
+const { requireAuth, requireRole, esAdminODueno } = require('../middleware/auth');
 const { obtenerConfiguracionTicket } = require('../utils/configuracionTicket');
 const { inicioDiaUTC, finDiaUTCExclusivo, hoyLocal } = require('../utils/fechas');
 
@@ -140,8 +140,8 @@ router.post('/', async (req, res) => {
   if (!METODOS_VALIDOS.includes(metodo_pago)) return res.status(400).json({ error: 'Método de pago inválido.' });
   if (metodo_pago === 'credito') {
     // La autorizacion de credito (limite y condiciones) es responsabilidad
-    // del Admin — un vendedor no puede abrir un credito por su cuenta.
-    if (req.usuario.rol !== 'admin') return res.status(403).json({ error: 'Solo un administrador puede autorizar una venta a crédito.' });
+    // del Admin/Dueño — un vendedor no puede abrir un credito por su cuenta.
+    if (!esAdminODueno(req.usuario.rol)) return res.status(403).json({ error: 'Solo un administrador puede autorizar una venta a crédito.' });
     if (!cliente_id) return res.status(400).json({ error: 'Una venta a crédito necesita un cliente.' });
   }
   if (!Array.isArray(items) || items.length === 0) return res.status(400).json({ error: 'La venta necesita al menos un producto.' });

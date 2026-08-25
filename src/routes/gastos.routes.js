@@ -1,6 +1,6 @@
 const express = require('express');
 const { pool } = require('../db');
-const { requireAuth, requireRole } = require('../middleware/auth');
+const { requireAuth, requireRole, esAdminODueno } = require('../middleware/auth');
 
 const router = express.Router();
 
@@ -10,9 +10,9 @@ router.use(requireAuth, requireRole('admin', 'vendedor'));
 
 router.get('/', async (req, res) => {
   const { desde, hasta, tipo, sucursal_id } = req.query;
-  // Solo el admin puede omitir sucursal_id (ve todas); los demas roles lo
+  // Admin y dueño pueden omitir sucursal_id (ven todas); los demas roles lo
   // siguen necesitando, mismo criterio que productos/reparaciones.
-  if (!sucursal_id && req.usuario.rol !== 'admin') return res.status(400).json({ error: 'sucursal_id es requerido.' });
+  if (!sucursal_id && !esAdminODueno(req.usuario.rol)) return res.status(400).json({ error: 'sucursal_id es requerido.' });
 
   const { rows } = await pool.query(
     `SELECT g.id, g.sucursal_id, g.usuario_id, u.nombre AS usuario_nombre, g.tipo, g.categoria, g.monto, g.descripcion, g.fecha, g.created_at
