@@ -27,7 +27,7 @@ router.get('/', requireRole('admin', 'vendedor', 'tecnico', 'community_manager')
   // mostrar en pantalla que un precio es especial.
   const { rows } = await pool.query(
     `SELECT p.id, p.sku, p.nombre, p.tipo, p.marca, p.modelo, p.ram, p.almacenamiento, p.procesador,
-            p.usa_imei, p.activo, p.costo,
+            p.usa_imei, p.activo, p.costo, p.precio_mayoreo, p.precio_revendedor,
             p.precio_venta AS precio_lista,
             COALESCE(pe_cliente.precio, pe_rol.precio, p.precio_venta) AS precio_venta,
             (pe_cliente.precio IS NOT NULL OR pe_rol.precio IS NOT NULL) AS precio_especial,
@@ -82,7 +82,7 @@ router.get('/movimientos', requireRole('admin', 'vendedor'), async (req, res) =>
 router.post('/', requireRole('admin', 'vendedor'), async (req, res) => {
   const {
     sku, nombre, categoria_id, tipo, marca, modelo, ram, almacenamiento, procesador, usa_imei,
-    precio_venta, costo, imagen_url, proveedor_id, sucursal_id, stock_inicial,
+    precio_venta, costo, precio_mayoreo, precio_revendedor, imagen_url, proveedor_id, sucursal_id, stock_inicial,
   } = req.body ?? {};
   if (!nombre?.trim()) return res.status(400).json({ error: 'El nombre es requerido.' });
   if (!['nuevo', 'usado', 'accesorio', 'servicio'].includes(tipo)) {
@@ -97,13 +97,13 @@ router.post('/', requireRole('admin', 'vendedor'), async (req, res) => {
     await client.query('BEGIN');
 
     const producto = await client.query(
-      `INSERT INTO productos (sku, nombre, categoria_id, tipo, marca, modelo, ram, almacenamiento, procesador, usa_imei, precio_venta, costo, imagen_url, proveedor_id)
-       VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14)
-       RETURNING id, sku, nombre, categoria_id, tipo, marca, modelo, ram, almacenamiento, procesador, usa_imei, precio_venta, costo, imagen_url, proveedor_id, activo`,
+      `INSERT INTO productos (sku, nombre, categoria_id, tipo, marca, modelo, ram, almacenamiento, procesador, usa_imei, precio_venta, costo, precio_mayoreo, precio_revendedor, imagen_url, proveedor_id)
+       VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16)
+       RETURNING id, sku, nombre, categoria_id, tipo, marca, modelo, ram, almacenamiento, procesador, usa_imei, precio_venta, costo, precio_mayoreo, precio_revendedor, imagen_url, proveedor_id, activo`,
       [
         sku || null, nombre.trim(), categoria_id || null, tipo, marca || null, modelo || null,
         ram || null, almacenamiento || null, procesador || null, usa_imei === false ? false : true,
-        precio_venta ?? 0, costo ?? 0, imagen_url || null, proveedor_id || null,
+        precio_venta ?? 0, costo ?? 0, precio_mayoreo ?? null, precio_revendedor ?? null, imagen_url || null, proveedor_id || null,
       ]
     );
 
@@ -142,6 +142,8 @@ router.patch('/:id', requireRole('admin', 'vendedor'), async (req, res) => {
     categoria_id: req.body?.categoria_id,
     precio_venta: req.body?.precio_venta,
     costo: req.body?.costo,
+    precio_mayoreo: req.body?.precio_mayoreo,
+    precio_revendedor: req.body?.precio_revendedor,
     marca: req.body?.marca,
     modelo: req.body?.modelo,
     ram: req.body?.ram,
@@ -166,7 +168,7 @@ router.patch('/:id', requireRole('admin', 'vendedor'), async (req, res) => {
   values.push(req.params.id);
   const { rows } = await pool.query(
     `UPDATE productos SET ${sets.join(', ')} WHERE id = $${i}
-     RETURNING id, sku, nombre, categoria_id, tipo, marca, modelo, ram, almacenamiento, procesador, usa_imei, precio_venta, costo, imagen_url, proveedor_id, activo`,
+     RETURNING id, sku, nombre, categoria_id, tipo, marca, modelo, ram, almacenamiento, procesador, usa_imei, precio_venta, costo, precio_mayoreo, precio_revendedor, imagen_url, proveedor_id, activo`,
     values
   );
   if (!rows[0]) return res.status(404).json({ error: 'Producto no encontrado.' });
@@ -336,6 +338,77 @@ router.delete('/:id/unidades/:unidadId', requireRole('admin', 'vendedor'), async
   } finally {
     client.release();
   }
+});
+
+// Importador de inventario desde Excel (CityApp parsea el archivo del lado
+// del cliente y manda solo las filas ya interpretadas, en tandas). Cada
+// item vive en su propia transaccion — a la escala de un historial de
+// compras real (cientos/miles de filas) no tiene sentido que una sola fila
+// con problema (ej. IMEI duplicado) tumbe a todas las demas del lote.
+router.post('/importar-lote', requireRole('admin', 'vendedor'), async (req, res) => {
+  const { sucursal_id, tipo, items } = req.body ?? {};
+  if (!sucursal_id) return res.status(400).json({ error: 'sucursal_id es requerido.' });
+  if (!['nuevo', 'usado'].includes(tipo)) return res.status(400).json({ error: 'tipo debe ser "nuevo" o "usado".' });
+  if (!Array.isArray(items) || items.length === 0) {
+    return res.status(400).json({ error: 'items debe ser una lista con al menos un elemento.' });
+  }
+
+  let creados = 0;
+  const fallidos = [];
+
+  for (const item of items) {
+    const client = await pool.connect();
+    try {
+      await client.query('BEGIN');
+
+      if (!item.nombre?.trim()) throw Object.assign(new Error('Nombre vacío.'), { statusCode: 400 });
+
+      const producto = await client.query(
+        `INSERT INTO productos (nombre, descripcion, tipo, usa_imei, precio_venta, costo, precio_mayoreo, precio_revendedor)
+         VALUES ($1, $2, $3, true, $4, $5, $6, $7)
+         RETURNING id`,
+        [
+          item.nombre.trim(),
+          item.descripcion || null,
+          tipo,
+          Number(item.precio_venta) || 0,
+          Number(item.costo) || 0,
+          item.precio_mayoreo != null ? Number(item.precio_mayoreo) : null,
+          item.precio_revendedor != null ? Number(item.precio_revendedor) : null,
+        ]
+      );
+      const productoId = producto.rows[0].id;
+
+      await client.query(
+        `INSERT INTO unidades_imei (producto_id, sucursal_id, imei) VALUES ($1, $2, $3)`,
+        [productoId, sucursal_id, item.imei?.trim() || null]
+      );
+
+      await client.query(
+        `INSERT INTO inventario (producto_id, sucursal_id, stock_cantidad)
+         VALUES ($1, $2, 1)
+         ON CONFLICT (producto_id, sucursal_id) DO UPDATE SET stock_cantidad = inventario.stock_cantidad + 1, updated_at = now()`,
+        [productoId, sucursal_id]
+      );
+
+      await client.query(
+        `INSERT INTO movimientos_inventario (producto_id, sucursal_id, tipo, cantidad, motivo, referencia_tipo, referencia_id, usuario_id)
+         VALUES ($1, $2, 'entrada', 1, 'Importado desde Excel', 'producto', $1, $3)`,
+        [productoId, sucursal_id, req.usuario.sub]
+      );
+
+      await client.query('COMMIT');
+      creados += 1;
+    } catch (err) {
+      await client.query('ROLLBACK');
+      const mensaje = err.code === '23505' ? 'Ese IMEI ya está registrado.' : err.message ?? 'Error desconocido.';
+      fallidos.push({ fila: item.fila ?? null, nombre: item.nombre ?? null, error: mensaje });
+    } finally {
+      client.release();
+    }
+  }
+
+  res.json({ creados, fallidos });
 });
 
 module.exports = router;

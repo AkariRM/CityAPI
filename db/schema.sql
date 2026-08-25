@@ -192,6 +192,8 @@ CREATE TABLE productos (
   descripcion    text,
   precio_venta   numeric(12,2) NOT NULL DEFAULT 0,
   costo          numeric(12,2) NOT NULL DEFAULT 0,
+  precio_mayoreo     numeric(12,2),
+  precio_revendedor  numeric(12,2),
   proveedor_id   uuid REFERENCES proveedores(id),
   imagen_url     text,
   activo         boolean NOT NULL DEFAULT true,
