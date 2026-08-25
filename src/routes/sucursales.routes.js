@@ -4,8 +4,12 @@ const { requireAuth, requireRole } = require('../middleware/auth');
 
 const router = express.Router();
 
-router.use(requireAuth, requireRole('admin'));
+router.use(requireAuth);
 
+// El listado es de lectura y lo necesita cualquier rol autenticado (elegir
+// sucursal al importar equipos, fijar la sucursal del dispositivo en
+// Configuracion, etc.) — solo dar de alta/editar sucursales sigue siendo
+// exclusivo de quien administra el catalogo de sucursales.
 router.get('/', async (req, res) => {
   const { activo } = req.query;
   // Sin parametro: solo activas (comportamiento historico, lo que ya usan
@@ -22,7 +26,7 @@ router.get('/', async (req, res) => {
   res.json(rows);
 });
 
-router.post('/', async (req, res) => {
+router.post('/', requireRole('admin'), async (req, res) => {
   const { nombre, direccion, telefono, fondo_caja_default } = req.body ?? {};
   if (!nombre?.trim()) return res.status(400).json({ error: 'El nombre es requerido.' });
 
@@ -34,7 +38,7 @@ router.post('/', async (req, res) => {
   res.status(201).json(rows[0]);
 });
 
-router.patch('/:id', async (req, res) => {
+router.patch('/:id', requireRole('admin'), async (req, res) => {
   const fields = {
     nombre: req.body?.nombre,
     direccion: req.body?.direccion,
