@@ -4,7 +4,7 @@ const { requireAuth, requireRole } = require('../middleware/auth');
 
 const router = express.Router();
 
-router.use(requireAuth, requireRole('admin', 'vendedor'));
+router.use(requireAuth, requireRole('admin', 'vendedor', 'tecnico'));
 
 router.get('/', async (req, res) => {
   const { q } = req.query;

@@ -14,7 +14,7 @@ router.get('/', async (req, res) => {
   // para poder ver y reactivar las dadas de baja.
   const filtro = activo === undefined ? true : activo === 'todas' ? null : activo === 'true';
   const { rows } = await pool.query(
-    `SELECT id, nombre, direccion, telefono, activo FROM sucursales
+    `SELECT id, nombre, direccion, telefono, fondo_caja_default, activo FROM sucursales
      WHERE ($1::boolean IS NULL OR activo = $1::boolean)
      ORDER BY nombre`,
     [filtro]
@@ -23,13 +23,13 @@ router.get('/', async (req, res) => {
 });
 
 router.post('/', async (req, res) => {
-  const { nombre, direccion, telefono } = req.body ?? {};
+  const { nombre, direccion, telefono, fondo_caja_default } = req.body ?? {};
   if (!nombre?.trim()) return res.status(400).json({ error: 'El nombre es requerido.' });
 
   const { rows } = await pool.query(
-    `INSERT INTO sucursales (nombre, direccion, telefono) VALUES ($1, $2, $3)
-     RETURNING id, nombre, direccion, telefono, activo`,
-    [nombre.trim(), direccion || null, telefono || null]
+    `INSERT INTO sucursales (nombre, direccion, telefono, fondo_caja_default) VALUES ($1, $2, $3, $4)
+     RETURNING id, nombre, direccion, telefono, fondo_caja_default, activo`,
+    [nombre.trim(), direccion || null, telefono || null, Number(fondo_caja_default) || 0]
   );
   res.status(201).json(rows[0]);
 });
@@ -39,6 +39,7 @@ router.patch('/:id', async (req, res) => {
     nombre: req.body?.nombre,
     direccion: req.body?.direccion,
     telefono: req.body?.telefono,
+    fondo_caja_default: req.body?.fondo_caja_default,
     activo: req.body?.activo,
   };
   const sets = [];
@@ -55,7 +56,7 @@ router.patch('/:id', async (req, res) => {
   values.push(req.params.id);
   const { rows } = await pool.query(
     `UPDATE sucursales SET ${sets.join(', ')} WHERE id = $${i}
-     RETURNING id, nombre, direccion, telefono, activo`,
+     RETURNING id, nombre, direccion, telefono, fondo_caja_default, activo`,
     values
   );
   if (!rows[0]) return res.status(404).json({ error: 'Sucursal no encontrada.' });

@@ -115,7 +115,9 @@ router.get('/', async (req, res) => {
 router.get('/resumen', async (req, res) => {
   const { sucursal_id } = req.query;
   if (!sucursal_id) return res.status(400).json({ error: 'sucursal_id es requerido.' });
-  res.json(await calcularResumen(sucursal_id, req.usuario.sub));
+  const resumen = await calcularResumen(sucursal_id, req.usuario.sub);
+  const sucursal = await pool.query(`SELECT fondo_caja_default FROM sucursales WHERE id = $1`, [sucursal_id]);
+  res.json({ ...resumen, fondo_caja_default: sucursal.rows[0]?.fondo_caja_default ?? 0 });
 });
 
 router.post('/', async (req, res) => {

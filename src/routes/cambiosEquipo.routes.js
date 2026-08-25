@@ -28,6 +28,7 @@ router.post('/', async (req, res) => {
     sucursal_id,
     cliente_id,
     cliente_nombre,
+    cliente_telefono,
     equipo_modelo,
     grado,
     grado_detalle,
@@ -42,6 +43,7 @@ router.post('/', async (req, res) => {
 
   if (!sucursal_id) return res.status(400).json({ error: 'sucursal_id es requerido.' });
   if (!cliente_nombre?.trim()) return res.status(400).json({ error: 'El nombre del cliente es requerido.' });
+  if (!cliente_telefono?.trim()) return res.status(400).json({ error: 'El teléfono del cliente es requerido.' });
   if (!equipo_modelo?.trim()) return res.status(400).json({ error: 'El equipo ofrecido es requerido.' });
   if (!GRADOS_VALIDOS.includes(grado)) return res.status(400).json({ error: 'Grado inválido.' });
   if (grado === 'otro' && !grado_detalle?.trim()) {
@@ -50,15 +52,16 @@ router.post('/', async (req, res) => {
 
   const { rows } = await pool.query(
     `INSERT INTO cambios_equipo
-       (sucursal_id, cliente_id, cliente_nombre, equipo_modelo, grado, grado_detalle, bateria_pct,
+       (sucursal_id, cliente_id, cliente_nombre, cliente_telefono, equipo_modelo, grado, grado_detalle, bateria_pct,
         pantalla_ok, cuerpo_ok, camaras_ok, botones_ok, valor_referencia, valor_ofrecido, usuario_id)
-     VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14)
-     RETURNING id, cliente_id, cliente_nombre, equipo_modelo, grado, grado_detalle, bateria_pct,
+     VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15)
+     RETURNING id, cliente_id, cliente_nombre, cliente_telefono, equipo_modelo, grado, grado_detalle, bateria_pct,
                pantalla_ok, cuerpo_ok, camaras_ok, botones_ok, valor_referencia, valor_ofrecido, estado, created_at`,
     [
       sucursal_id,
       cliente_id || null,
       cliente_nombre.trim(),
+      cliente_telefono.trim(),
       equipo_modelo.trim(),
       grado,
       grado === 'otro' ? grado_detalle.trim() : null,

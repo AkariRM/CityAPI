@@ -76,13 +76,14 @@ CREATE TABLE empresas (
 INSERT INTO empresas (slug, nombre) VALUES ('cityphone', 'CityPhone'), ('aurea', 'Áurea');
 
 CREATE TABLE sucursales (
-  id          uuid PRIMARY KEY DEFAULT gen_random_uuid(),
-  nombre      text NOT NULL,
-  direccion   text,
-  telefono    text,
-  activo      boolean NOT NULL DEFAULT true,
-  created_at  timestamptz NOT NULL DEFAULT now(),
-  updated_at  timestamptz NOT NULL DEFAULT now()
+  id                  uuid PRIMARY KEY DEFAULT gen_random_uuid(),
+  nombre              text NOT NULL,
+  direccion           text,
+  telefono            text,
+  fondo_caja_default  numeric(12,2) NOT NULL DEFAULT 0,
+  activo              boolean NOT NULL DEFAULT true,
+  created_at          timestamptz NOT NULL DEFAULT now(),
+  updated_at          timestamptz NOT NULL DEFAULT now()
 );
 
 CREATE TABLE usuarios (
@@ -371,6 +372,7 @@ CREATE TABLE cambios_equipo (
   sucursal_id       uuid NOT NULL REFERENCES sucursales(id),
   cliente_id        uuid REFERENCES clientes(id),
   cliente_nombre    text NOT NULL,
+  cliente_telefono  text NOT NULL,
   equipo_modelo     text NOT NULL,
   grado             grado_cambio_equipo NOT NULL,
   grado_detalle     text,
@@ -462,6 +464,7 @@ CREATE TABLE reparaciones (
   equipo_marca       text,
   equipo_modelo      text,
   imei_equipo        text,
+  equipo_contrasena  text,
   problema_reportado text NOT NULL,
   diagnostico        text,
   estado             estado_reparacion NOT NULL DEFAULT 'recibido',

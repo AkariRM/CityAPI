@@ -87,7 +87,7 @@ router.get('/:id', async (req, res) => {
   const reparacionResult = await pool.query(
     `SELECT r.id, r.folio, r.cliente_id, c.nombre AS cliente_nombre, c.telefono AS cliente_telefono, r.sucursal_id,
             s.nombre AS sucursal_nombre, s.direccion AS sucursal_direccion, s.telefono AS sucursal_telefono,
-            r.equipo_marca, r.equipo_modelo, r.imei_equipo, r.problema_reportado, r.diagnostico,
+            r.equipo_marca, r.equipo_modelo, r.imei_equipo, r.equipo_contrasena, r.problema_reportado, r.diagnostico,
             r.estado, r.prioridad, r.tecnico_id, t.nombre AS tecnico_nombre,
             r.costo_mano_obra, r.costo_refacciones, r.total, r.garantia_dias, r.created_at, r.updated_at
      FROM reparaciones r
@@ -136,11 +136,12 @@ router.get('/:id', async (req, res) => {
   });
 });
 
-router.post('/', requireRole('admin', 'vendedor'), async (req, res) => {
-  const { cliente_id, sucursal_id, equipo_marca, equipo_modelo, imei_equipo, problema_reportado, prioridad } = req.body ?? {};
+router.post('/', requireRole('admin', 'vendedor', 'tecnico'), async (req, res) => {
+  const { cliente_id, sucursal_id, telefono, equipo_marca, equipo_modelo, imei_equipo, equipo_contrasena, problema_reportado, prioridad } = req.body ?? {};
 
   if (!cliente_id) return res.status(400).json({ error: 'cliente_id es requerido.' });
   if (!sucursal_id) return res.status(400).json({ error: 'sucursal_id es requerido.' });
+  if (!telefono?.trim()) return res.status(400).json({ error: 'El teléfono de contacto es requerido.' });
   if (!problema_reportado?.trim()) return res.status(400).json({ error: 'Describe el problema reportado.' });
   const prioridadFinal = PRIORIDADES_VALIDAS.includes(prioridad) ? prioridad : 'media';
 
@@ -148,11 +149,18 @@ router.post('/', requireRole('admin', 'vendedor'), async (req, res) => {
   try {
     await client.query('BEGIN');
 
+    // El telefono capturado aqui se guarda tambien en el cliente (no solo de
+    // paso en la reparacion) — asi queda disponible para futuras visitas,
+    // sin volver clientes.telefono obligatorio a nivel de tabla (otros
+    // modulos, como ventas, lo siguen dejando opcional). Solo escribe si
+    // cambio, para no generar updates de a gratis en el caso comun.
+    await client.query(`UPDATE clientes SET telefono = $1 WHERE id = $2 AND telefono IS DISTINCT FROM $1`, [telefono.trim(), cliente_id]);
+
     const reparacion = await client.query(
-      `INSERT INTO reparaciones (cliente_id, sucursal_id, equipo_marca, equipo_modelo, imei_equipo, problema_reportado, prioridad)
-       VALUES ($1, $2, $3, $4, $5, $6, $7)
+      `INSERT INTO reparaciones (cliente_id, sucursal_id, equipo_marca, equipo_modelo, imei_equipo, equipo_contrasena, problema_reportado, prioridad)
+       VALUES ($1, $2, $3, $4, $5, $6, $7, $8)
        RETURNING id, folio, estado, created_at`,
-      [cliente_id, sucursal_id, equipo_marca || null, equipo_modelo || null, imei_equipo || null, problema_reportado.trim(), prioridadFinal]
+      [cliente_id, sucursal_id, equipo_marca || null, equipo_modelo || null, imei_equipo || null, equipo_contrasena || null, problema_reportado.trim(), prioridadFinal]
     );
 
     await client.query(
