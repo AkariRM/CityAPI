@@ -37,6 +37,7 @@ const busquedaRoutes = require('./src/routes/busqueda.routes');
 const celularesRoutes = require('./src/routes/celulares.routes');
 const aureaProductosRoutes = require('./src/routes/aureaProductos.routes');
 const aureaVentasRoutes = require('./src/routes/aureaVentas.routes');
+const n8nRoutes = require('./src/routes/n8n.routes');
 
 const app = express();
 
@@ -68,7 +69,13 @@ app.use(
   })
 );
 
-app.use(express.json());
+// Limite subido de 100kb (default) a 15mb: las automatizaciones de IA via
+// n8n mandan imagenes/audio en base64 dentro del JSON (ver n8n.routes.js),
+// que facilmente pasan de 1-3MB. Tiene que subirse aqui, en el
+// express.json() global — uno con limite mas alto puesto solo en el router
+// de n8n no sirve de nada porque este ya habria rechazado el body antes de
+// que la petición llegue ahi.
+app.use(express.json({ limit: '15mb' }));
 
 app.get('/health', (req, res) => {
   res.status(200).json({ status: 'ok' });
@@ -111,6 +118,7 @@ app.use('/busqueda', busquedaRoutes);
 app.use('/celulares-vendidos', celularesRoutes);
 app.use('/aurea/productos', aureaProductosRoutes);
 app.use('/aurea/ventas', aureaVentasRoutes);
+app.use('/n8n', n8nRoutes);
 
 app.use((req, res) => {
   res.status(404).json({ error: 'Ruta no encontrada.' });
