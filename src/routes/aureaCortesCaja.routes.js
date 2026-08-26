@@ -2,6 +2,7 @@ const express = require('express');
 const { pool } = require('../db');
 const { requireAuth, requireRole, requireEmpresa } = require('../middleware/auth');
 const { inicioDiaUTC, finDiaUTCExclusivo } = require('../utils/fechas');
+const { obtenerConfiguracionTicketAurea } = require('../utils/configuracionTicketAurea');
 
 const router = express.Router();
 router.use(requireAuth, requireRole('dueño', 'admin', 'pto'), requireEmpresa('aurea'));
@@ -88,7 +89,8 @@ router.get('/', async (req, res) => {
 
 router.get('/resumen', async (req, res) => {
   const resumen = await calcularResumen(req.usuario.sub);
-  res.json(resumen);
+  const config = await obtenerConfiguracionTicketAurea();
+  res.json({ ...resumen, fondo_caja_default: config.fondo_caja_default });
 });
 
 router.post('/', async (req, res) => {

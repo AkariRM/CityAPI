@@ -20,6 +20,7 @@ router.patch('/', async (req, res) => {
     mostrar_vendedor: req.body?.mostrar_vendedor,
     mostrar_cliente: req.body?.mostrar_cliente,
     mensaje_pie: req.body?.mensaje_pie,
+    fondo_caja_default: req.body?.fondo_caja_default,
   };
   const sets = [];
   const values = [];

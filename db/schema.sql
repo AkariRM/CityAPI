@@ -858,14 +858,20 @@ CREATE INDEX idx_aurea_cortes_caja_usuario ON aurea_cortes_caja(usuario_id);
 -- Configuracion del ticket/recibo impreso — mismo shape que
 -- configuracion_ticket de CityPhone, singleton propio de Áurea.
 CREATE TABLE aurea_configuracion_ticket (
-  id                 uuid PRIMARY KEY DEFAULT gen_random_uuid(),
-  nombre_negocio     text NOT NULL DEFAULT 'Áurea',
-  mostrar_direccion  boolean NOT NULL DEFAULT true,
-  mostrar_telefono   boolean NOT NULL DEFAULT true,
-  mostrar_vendedor   boolean NOT NULL DEFAULT true,
-  mostrar_cliente    boolean NOT NULL DEFAULT true,
-  mensaje_pie        text NOT NULL DEFAULT '¡Gracias por tu compra!',
-  updated_at         timestamptz NOT NULL DEFAULT now()
+  id                  uuid PRIMARY KEY DEFAULT gen_random_uuid(),
+  nombre_negocio      text NOT NULL DEFAULT 'Áurea',
+  mostrar_direccion   boolean NOT NULL DEFAULT true,
+  mostrar_telefono    boolean NOT NULL DEFAULT true,
+  mostrar_vendedor    boolean NOT NULL DEFAULT true,
+  mostrar_cliente     boolean NOT NULL DEFAULT true,
+  mensaje_pie         text NOT NULL DEFAULT '¡Gracias por tu compra!',
+  -- Fondo de caja predeterminado con el que arranca el turno en Corte de
+  -- caja (editable ahi mismo cada vez, esto solo prellena el punto de
+  -- partida) — en CityPhone esto vive en sucursales.fondo_caja_default,
+  -- pero Áurea no tiene sucursales, asi que se guarda aqui junto al resto
+  -- de la configuracion general del negocio.
+  fondo_caja_default numeric(12,2) NOT NULL DEFAULT 0,
+  updated_at          timestamptz NOT NULL DEFAULT now()
 );
 
 -- ============================================================================
