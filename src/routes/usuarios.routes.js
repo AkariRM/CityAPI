@@ -12,13 +12,19 @@ const ROLES_CITYPHONE_CON_SUCURSAL = ['admin', 'vendedor', 'tecnico', 'community
 router.use(requireAuth, requireRole('dueño', 'admin'));
 
 router.get('/', async (req, res) => {
+  // El Dueño ve ambas empresas (las administra); cualquier otro rol (admin/
+  // Supervisor) solo ve las cuentas de su propia empresa — antes esto no se
+  // filtraba y un Supervisor de CityPhone veia tambien las cuentas de Áurea.
+  const filtroEmpresa = req.usuario.rol === 'dueño' ? null : req.usuario.empresa_id;
   const { rows } = await pool.query(
     `SELECT u.id, u.nombre, u.telefono, u.email, u.rol, u.sucursal_id, u.empresa_id,
             s.nombre AS sucursal_nombre, e.nombre AS empresa_nombre, u.activo, u.created_at
      FROM usuarios u
      LEFT JOIN sucursales s ON s.id = u.sucursal_id
      LEFT JOIN empresas e ON e.id = u.empresa_id
-     ORDER BY u.nombre`
+     WHERE ($1::uuid IS NULL OR u.empresa_id = $1::uuid)
+     ORDER BY u.nombre`,
+    [filtroEmpresa]
   );
   res.json(rows);
 });
