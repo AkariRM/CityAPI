@@ -5,9 +5,11 @@ const { isValidPin, hashPin } = require('../utils/pin');
 
 const router = express.Router();
 const ROLES_VALIDOS = ['dueño', 'admin', 'vendedor', 'tecnico', 'community_manager', 'pto'];
-// Solo estos roles pertenecen a CityPhone y necesitan sucursal — 'dueño' no
-// se ata a ninguna empresa/sucursal, 'pto' es de Áurea (sin sucursales fase 1).
-const ROLES_CITYPHONE_CON_SUCURSAL = ['admin', 'vendedor', 'tecnico', 'community_manager'];
+// Roles que solo existen en CityPhone y siempre necesitan sucursal — 'admin'
+// (Supervisor) no entra aqui porque tambien puede ser de Áurea (via su propio
+// empresa_id), y Áurea no tiene sucursales todavia (fase 1); en ese caso se
+// resuelve abajo comparando contra la empresa real del usuario.
+const ROLES_CITYPHONE_CON_SUCURSAL = ['vendedor', 'tecnico', 'community_manager'];
 
 router.use(requireAuth, requireRole('dueño', 'admin'));
 
@@ -46,7 +48,16 @@ router.post('/', async (req, res) => {
   if (rol !== 'dueño' && !empresa_id) {
     return res.status(400).json({ error: 'La empresa es requerida.' });
   }
-  if (ROLES_CITYPHONE_CON_SUCURSAL.includes(rol) && !sucursal_id) {
+
+  let empresaSlug = null;
+  if (empresa_id) {
+    const { rows } = await pool.query('SELECT slug FROM empresas WHERE id = $1', [empresa_id]);
+    empresaSlug = rows[0]?.slug ?? null;
+  }
+  // 'admin' necesita sucursal solo cuando es de CityPhone — el mismo rol
+  // tambien sirve como Supervisor de Áurea, que no tiene sucursales.
+  const necesitaSucursal = ROLES_CITYPHONE_CON_SUCURSAL.includes(rol) || (rol === 'admin' && empresaSlug === 'cityphone');
+  if (necesitaSucursal && !sucursal_id) {
     return res.status(400).json({ error: 'La sucursal es requerida.' });
   }
 
