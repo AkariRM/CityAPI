@@ -703,10 +703,35 @@ CREATE TABLE configuracion_ticket (
 
 -- ============================================================================
 -- AUREA (segunda empresa de CityCorp — tienda de maquillaje/beauty/perfumes)
--- Fase 1 deliberadamente minima: solo catalogo y ventas, nada de clientes,
--- creditos, apartados, cambios, corte de caja ni sucursales todavia. Tablas
--- totalmente separadas de las de CityPhone (ninguna FK cruzada) a proposito.
+-- Ampliado a paridad de modulos con CityPhone (proveedores, kardex,
+-- clientes, apartados, corte de caja, configuracion/tickets, reportes) pero
+-- manteniendo el espiritu original: sin sucursales (una sola ubicacion),
+-- sin IMEI, sin creditos. Tablas totalmente separadas de las de CityPhone
+-- (ninguna FK cruzada) a proposito.
 -- ============================================================================
+
+CREATE TABLE aurea_proveedores (
+  id          uuid PRIMARY KEY DEFAULT gen_random_uuid(),
+  nombre      text NOT NULL,
+  contacto    text,
+  telefono    text,
+  email       text,
+  notas       text,
+  activo      boolean NOT NULL DEFAULT true,
+  created_at  timestamptz NOT NULL DEFAULT now()
+);
+
+CREATE TABLE aurea_clientes (
+  id          uuid PRIMARY KEY DEFAULT gen_random_uuid(),
+  nombre      text NOT NULL,
+  telefono    text,
+  email       text,
+  direccion   text,
+  notas       text,
+  created_at  timestamptz NOT NULL DEFAULT now(),
+  updated_at  timestamptz NOT NULL DEFAULT now()
+);
+CREATE INDEX idx_aurea_clientes_telefono ON aurea_clientes(telefono);
 
 CREATE TABLE aurea_productos (
   id              uuid PRIMARY KEY DEFAULT gen_random_uuid(),
@@ -715,24 +740,46 @@ CREATE TABLE aurea_productos (
   precio_venta    numeric(12,2) NOT NULL,
   costo           numeric(12,2) NOT NULL DEFAULT 0,
   stock_cantidad  integer NOT NULL DEFAULT 0,
+  stock_apartado  integer NOT NULL DEFAULT 0 CHECK (stock_apartado >= 0),
+  stock_minimo    integer NOT NULL DEFAULT 0,
+  proveedor_id    uuid REFERENCES aurea_proveedores(id),
   imagen_url      text,
   activo          boolean NOT NULL DEFAULT true,
   created_at      timestamptz NOT NULL DEFAULT now(),
   updated_at      timestamptz NOT NULL DEFAULT now()
 );
 CREATE INDEX idx_aurea_productos_activo ON aurea_productos(activo);
+CREATE INDEX idx_aurea_productos_proveedor ON aurea_productos(proveedor_id);
+
+-- Bitacora de entradas/salidas/ajustes — mismo shape que
+-- movimientos_inventario de CityPhone, sin sucursal_id (una sola ubicacion).
+CREATE TABLE aurea_movimientos_inventario (
+  id               uuid PRIMARY KEY DEFAULT gen_random_uuid(),
+  producto_id      uuid NOT NULL REFERENCES aurea_productos(id),
+  tipo             tipo_movimiento_inventario NOT NULL,
+  cantidad         integer NOT NULL,
+  motivo           text,
+  referencia_tipo  text,
+  referencia_id    uuid,
+  usuario_id       uuid REFERENCES usuarios(id),
+  created_at       timestamptz NOT NULL DEFAULT now()
+);
+CREATE INDEX idx_aurea_movimientos_producto ON aurea_movimientos_inventario(producto_id);
+CREATE INDEX idx_aurea_movimientos_referencia ON aurea_movimientos_inventario(referencia_tipo, referencia_id);
 
 CREATE SEQUENCE aurea_ventas_folio_seq;
 CREATE TABLE aurea_ventas (
   id           uuid PRIMARY KEY DEFAULT gen_random_uuid(),
   folio        text NOT NULL UNIQUE DEFAULT ('AU-' || lpad(nextval('aurea_ventas_folio_seq')::text, 6, '0')),
   usuario_id   uuid NOT NULL REFERENCES usuarios(id),
+  cliente_id   uuid REFERENCES aurea_clientes(id),
   metodo_pago  metodo_pago NOT NULL,
   subtotal     numeric(12,2) NOT NULL,
   total        numeric(12,2) NOT NULL,
   created_at   timestamptz NOT NULL DEFAULT now()
 );
 CREATE INDEX idx_aurea_ventas_usuario ON aurea_ventas(usuario_id);
+CREATE INDEX idx_aurea_ventas_cliente ON aurea_ventas(cliente_id);
 
 CREATE TABLE aurea_venta_items (
   id               uuid PRIMARY KEY DEFAULT gen_random_uuid(),
@@ -743,6 +790,83 @@ CREATE TABLE aurea_venta_items (
   subtotal         numeric(12,2) NOT NULL
 );
 CREATE INDEX idx_aurea_venta_items_venta ON aurea_venta_items(venta_id);
+
+-- Apartados (layaway) — mismo shape que apartados de CityPhone, sin
+-- sucursal_id ni unidad_imei_id (Áurea no rastrea unidades por IMEI). El
+-- "hold" de stock vive directo en aurea_productos.stock_apartado (no hay
+-- una tabla "inventario" aparte como en CityPhone, porque no hay dimension
+-- de sucursal que la justifique).
+CREATE SEQUENCE aurea_apartados_folio_seq;
+CREATE TABLE aurea_apartados (
+  id              uuid PRIMARY KEY DEFAULT gen_random_uuid(),
+  folio           text NOT NULL UNIQUE DEFAULT ('AAP-' || lpad(nextval('aurea_apartados_folio_seq')::text, 6, '0')),
+  cliente_id      uuid NOT NULL REFERENCES aurea_clientes(id),
+  producto_id     uuid NOT NULL REFERENCES aurea_productos(id),
+  cantidad        integer NOT NULL DEFAULT 1 CHECK (cantidad > 0),
+  precio_total    numeric(12,2) NOT NULL,
+  monto_abonado   numeric(12,2) NOT NULL DEFAULT 0,
+  estado          estado_apartado NOT NULL DEFAULT 'activo',
+  usuario_id      uuid NOT NULL REFERENCES usuarios(id),
+  created_at      timestamptz NOT NULL DEFAULT now(),
+  updated_at      timestamptz NOT NULL DEFAULT now()
+);
+CREATE INDEX idx_aurea_apartados_cliente ON aurea_apartados(cliente_id);
+CREATE INDEX idx_aurea_apartados_producto ON aurea_apartados(producto_id);
+CREATE INDEX idx_aurea_apartados_estado ON aurea_apartados(estado);
+
+CREATE TABLE aurea_apartado_abonos (
+  id            uuid PRIMARY KEY DEFAULT gen_random_uuid(),
+  apartado_id   uuid NOT NULL REFERENCES aurea_apartados(id),
+  monto         numeric(12,2) NOT NULL,
+  metodo        metodo_pago NOT NULL,
+  usuario_id    uuid REFERENCES usuarios(id),
+  created_at    timestamptz NOT NULL DEFAULT now()
+);
+CREATE INDEX idx_aurea_apartado_abonos_apartado ON aurea_apartado_abonos(apartado_id);
+
+-- Salidas de caja (gasto/retiro) — mismo shape que gastos de CityPhone, sin
+-- sucursal_id. Alimenta tanto el corte de caja (resta del efectivo
+-- esperado) como el reporte financiero ('gasto' cuenta como costo real).
+CREATE TABLE aurea_gastos (
+  id           uuid PRIMARY KEY DEFAULT gen_random_uuid(),
+  usuario_id   uuid REFERENCES usuarios(id),
+  tipo         text NOT NULL DEFAULT 'gasto' CHECK (tipo IN ('gasto', 'retiro')),
+  categoria    text NOT NULL,
+  monto        numeric(12,2) NOT NULL,
+  descripcion  text,
+  fecha        date NOT NULL DEFAULT current_date,
+  created_at   timestamptz NOT NULL DEFAULT now()
+);
+CREATE INDEX idx_aurea_gastos_fecha ON aurea_gastos(fecha);
+
+-- Corte de caja — mismo shape que cortes_caja de CityPhone, sin
+-- sucursal_id ni total_credito (Áurea no tiene creditos).
+CREATE TABLE aurea_cortes_caja (
+  id              uuid PRIMARY KEY DEFAULT gen_random_uuid(),
+  usuario_id      uuid NOT NULL REFERENCES usuarios(id),
+  turno_inicio    timestamptz NOT NULL,
+  turno_fin       timestamptz,
+  fondo_inicial   numeric(12,2) NOT NULL DEFAULT 0,
+  total_efectivo  numeric(12,2) NOT NULL DEFAULT 0,
+  total_tarjeta   numeric(12,2) NOT NULL DEFAULT 0,
+  total_sistema   numeric(12,2) NOT NULL DEFAULT 0,
+  diferencia      numeric(12,2) NOT NULL DEFAULT 0,
+  created_at      timestamptz NOT NULL DEFAULT now()
+);
+CREATE INDEX idx_aurea_cortes_caja_usuario ON aurea_cortes_caja(usuario_id);
+
+-- Configuracion del ticket/recibo impreso — mismo shape que
+-- configuracion_ticket de CityPhone, singleton propio de Áurea.
+CREATE TABLE aurea_configuracion_ticket (
+  id                 uuid PRIMARY KEY DEFAULT gen_random_uuid(),
+  nombre_negocio     text NOT NULL DEFAULT 'Áurea',
+  mostrar_direccion  boolean NOT NULL DEFAULT true,
+  mostrar_telefono   boolean NOT NULL DEFAULT true,
+  mostrar_vendedor   boolean NOT NULL DEFAULT true,
+  mostrar_cliente    boolean NOT NULL DEFAULT true,
+  mensaje_pie        text NOT NULL DEFAULT '¡Gracias por tu compra!',
+  updated_at         timestamptz NOT NULL DEFAULT now()
+);
 
 -- ============================================================================
 -- TRIGGERS updated_at
@@ -775,4 +899,10 @@ CREATE TRIGGER trg_marketplace_listados_updated_at BEFORE UPDATE ON marketplace_
 CREATE TRIGGER trg_configuracion_ticket_updated_at BEFORE UPDATE ON configuracion_ticket
   FOR EACH ROW EXECUTE FUNCTION set_updated_at();
 CREATE TRIGGER trg_aurea_productos_updated_at BEFORE UPDATE ON aurea_productos
+  FOR EACH ROW EXECUTE FUNCTION set_updated_at();
+CREATE TRIGGER trg_aurea_clientes_updated_at BEFORE UPDATE ON aurea_clientes
+  FOR EACH ROW EXECUTE FUNCTION set_updated_at();
+CREATE TRIGGER trg_aurea_apartados_updated_at BEFORE UPDATE ON aurea_apartados
+  FOR EACH ROW EXECUTE FUNCTION set_updated_at();
+CREATE TRIGGER trg_aurea_configuracion_ticket_updated_at BEFORE UPDATE ON aurea_configuracion_ticket
   FOR EACH ROW EXECUTE FUNCTION set_updated_at();

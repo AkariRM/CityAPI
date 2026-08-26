@@ -37,6 +37,13 @@ const busquedaRoutes = require('./src/routes/busqueda.routes');
 const celularesRoutes = require('./src/routes/celulares.routes');
 const aureaProductosRoutes = require('./src/routes/aureaProductos.routes');
 const aureaVentasRoutes = require('./src/routes/aureaVentas.routes');
+const aureaProveedoresRoutes = require('./src/routes/aureaProveedores.routes');
+const aureaClientesRoutes = require('./src/routes/aureaClientes.routes');
+const aureaApartadosRoutes = require('./src/routes/aureaApartados.routes');
+const aureaGastosRoutes = require('./src/routes/aureaGastos.routes');
+const aureaCortesCajaRoutes = require('./src/routes/aureaCortesCaja.routes');
+const aureaConfiguracionRoutes = require('./src/routes/aureaConfiguracion.routes');
+const aureaReportesRoutes = require('./src/routes/aureaReportes.routes');
 const n8nRoutes = require('./src/routes/n8n.routes');
 
 const app = express();
@@ -118,6 +125,13 @@ app.use('/busqueda', busquedaRoutes);
 app.use('/celulares-vendidos', celularesRoutes);
 app.use('/aurea/productos', aureaProductosRoutes);
 app.use('/aurea/ventas', aureaVentasRoutes);
+app.use('/aurea/proveedores', aureaProveedoresRoutes);
+app.use('/aurea/clientes', aureaClientesRoutes);
+app.use('/aurea/apartados', aureaApartadosRoutes);
+app.use('/aurea/gastos', aureaGastosRoutes);
+app.use('/aurea/cortes-caja', aureaCortesCajaRoutes);
+app.use('/aurea/configuracion-ticket', aureaConfiguracionRoutes);
+app.use('/aurea/reportes', aureaReportesRoutes);
 app.use('/n8n', n8nRoutes);
 
 app.use((req, res) => {
