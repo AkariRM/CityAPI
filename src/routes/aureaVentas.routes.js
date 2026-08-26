@@ -2,7 +2,7 @@ const express = require('express');
 const { pool } = require('../db');
 const { requireAuth, requireRole, requireEmpresa } = require('../middleware/auth');
 const { obtenerConfiguracionTicketAurea } = require('../utils/configuracionTicketAurea');
-const { inicioDiaUTC, finDiaUTCExclusivo } = require('../utils/fechas');
+const { inicioDiaUTC, finDiaUTCExclusivo, hoyLocal } = require('../utils/fechas');
 
 const router = express.Router();
 router.use(requireAuth, requireRole('dueño', 'admin', 'pto'), requireEmpresa('aurea'));
@@ -33,6 +33,38 @@ router.get('/', async (req, res) => {
     [folio || null, usuarioFiltro, desde ? inicioDiaUTC(desde) : null, hasta ? finDiaUTCExclusivo(hasta) : null]
   );
   res.json(rows);
+});
+
+// Para el Dashboard general de Áurea — mismo par de endpoints que
+// ventas.routes.js (resumen-dia / resumen-rango). Van antes de "/:id" para
+// que Express no los confunda con un id.
+router.get('/resumen-dia', async (req, res) => {
+  const { fecha } = req.query;
+  const dia = fecha || hoyLocal();
+
+  const { rows } = await pool.query(
+    `SELECT COALESCE(sum(total), 0) AS total, count(*)::int AS cantidad
+     FROM aurea_ventas
+     WHERE created_at >= $1::timestamptz AND created_at < $2::timestamptz`,
+    [inicioDiaUTC(dia), finDiaUTCExclusivo(dia)]
+  );
+  res.json({ fecha: dia, total: Number(rows[0].total), cantidad: rows[0].cantidad });
+});
+
+router.get('/resumen-rango', async (req, res) => {
+  const { desde, hasta } = req.query;
+  if (!desde || !hasta) return res.status(400).json({ error: 'desde y hasta son requeridos (YYYY-MM-DD).' });
+
+  const { rows } = await pool.query(
+    `SELECT (date_trunc('day', created_at - interval '6 hours'))::date::text AS dia,
+            COALESCE(sum(total), 0) AS total, count(*)::int AS cantidad
+     FROM aurea_ventas
+     WHERE created_at >= $1::timestamptz AND created_at < $2::timestamptz
+     GROUP BY dia
+     ORDER BY dia`,
+    [inicioDiaUTC(desde), finDiaUTCExclusivo(hasta)]
+  );
+  res.json(rows.map((r) => ({ fecha: r.dia, total: Number(r.total), cantidad: r.cantidad })));
 });
 
 router.get('/:id', async (req, res) => {
