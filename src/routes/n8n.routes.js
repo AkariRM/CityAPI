@@ -1,6 +1,7 @@
 const express = require('express');
 const { requireAuth, requireRole } = require('../middleware/auth');
 const { llamarWebhookN8n } = require('../utils/n8n');
+const { subirBufferABucket } = require('../utils/almacenamiento');
 
 const router = express.Router();
 router.use(requireAuth);
@@ -120,7 +121,12 @@ router.post('/cm/publicar-contenido', requireRole('admin', 'community_manager'),
   });
 });
 
-// 5 — Mejorar imagen con IA (cambio de fondo)
+// 5 — Mejorar imagen con IA (cambio de fondo). A diferencia de los demas,
+// no usa relayarWebhook: la respuesta de n8n trae la imagen resuelta
+// (imagen_modificada, como URL o como base64) y aqui se normaliza siempre a
+// una URL de nuestro propio bucket antes de contestarle a la app, para que
+// el frontend reciba el mismo { url } que ya conoce de /uploads/imagen sin
+// importar en que formato haya regresado n8n.
 router.post('/media/mejorar-imagen', requireRole('admin', 'vendedor', 'pto'), async (req, res) => {
   if (!validarEmpresa(req, res)) return;
   const faltan = faltantes(req.body, ['tipo', 'imagen']);
@@ -129,12 +135,29 @@ router.post('/media/mejorar-imagen', requireRole('admin', 'vendedor', 'pto'), as
     return res.status(400).json({ error: 'tipo debe ser "equipo" o "accesorio".' });
   }
 
-  await relayarWebhook(res, process.env.N8N_WEBHOOK_MEJORAR_IMAGEN, {
-    ...contexto(req),
-    empresa: req.body.empresa,
-    tipo: req.body.tipo,
-    imagen: req.body.imagen,
-  });
+  try {
+    const { data } = await llamarWebhookN8n(process.env.N8N_WEBHOOK_MEJORAR_IMAGEN, {
+      ...contexto(req),
+      empresa: req.body.empresa,
+      tipo: req.body.tipo,
+      imagen: req.body.imagen,
+    });
+
+    const resultado = data?.imagen_modificada;
+    if (!resultado) return res.status(502).json({ error: 'La IA no devolvió una imagen.' });
+
+    if (/^https?:\/\//i.test(resultado)) {
+      return res.json({ url: resultado });
+    }
+
+    const match = /^data:(image\/\w+);base64,(.+)$/.exec(resultado);
+    const mimeType = match?.[1] ?? 'image/jpeg';
+    const base64 = match ? match[2] : resultado;
+    const { url } = await subirBufferABucket(Buffer.from(base64, 'base64'), mimeType);
+    res.json({ url });
+  } catch (err) {
+    res.status(err.statusCode ?? 500).json({ error: err.statusCode ? err.message : 'Error interno del servidor.' });
+  }
 });
 
 // 6 — Notificaciones al cliente (agente)
