@@ -75,7 +75,7 @@ router.post('/', async (req, res) => {
   const { rows } = await pool.query(
     `INSERT INTO publicaciones
        (plataforma, tipo_contenido, hook, contenido_texto, cta, hashtags, imagen_url, producto_id, promocion_id, fecha_programada, creado_por, estado, url_publicacion, post_id)
-     VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, COALESCE($12, 'pendiente'), $13, $14)
+     VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, COALESCE($12::estado_publicacion, 'pendiente'), $13, $14)
      RETURNING id, plataforma, tipo_contenido, hook, contenido_texto, cta, hashtags, imagen_url, estado, url_publicacion, post_id,
                fecha_programada, producto_id, promocion_id, creado_por, created_at`,
     [
