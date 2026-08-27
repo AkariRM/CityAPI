@@ -62,12 +62,14 @@ router.post('/', async (req, res) => {
   if (hashtags !== undefined && hashtags !== null && !Array.isArray(hashtags)) {
     return res.status(400).json({ error: 'hashtags debe ser una lista de texto.' });
   }
-  // "programado"/"rechazado" solo tienen sentido como transicion de un
-  // pendiente ya existente (via /:id/aprobar, /:id/rechazar) — al crear solo
-  // se permite el default "pendiente" (flujo manual) o "publicado" (caso de
-  // /cm/publicar-contenido, que ya publico de verdad antes de guardar el registro).
-  if (estado !== undefined && !['pendiente', 'publicado'].includes(estado)) {
-    return res.status(400).json({ error: 'estado inválido: solo "pendiente" o "publicado" al crear.' });
+  // "rechazado" solo tiene sentido como transicion de un pendiente ya
+  // existente (via /:id/rechazar) — al crear solo se permite el default
+  // "pendiente" (flujo manual), o "publicado"/"programado" (caso de
+  // /cm/publicar-contenido, que ya publico o agendo de verdad en n8n antes
+  // de guardar el registro — "programado" aqui NO pasa por /:id/aprobar,
+  // ya esta agendado del lado real).
+  if (estado !== undefined && !['pendiente', 'publicado', 'programado'].includes(estado)) {
+    return res.status(400).json({ error: 'estado inválido: solo "pendiente", "publicado" o "programado" al crear.' });
   }
 
   const { rows } = await pool.query(
