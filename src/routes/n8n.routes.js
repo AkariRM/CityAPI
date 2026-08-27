@@ -104,10 +104,18 @@ router.post('/cm/generar-contenido', requireRole('admin', 'community_manager'), 
 // 4 — Publicacion de contenido con IA (enrutado por red social)
 // OJO: a diferencia del resto, este endpoint SI publica de verdad en la
 // red social correspondiente del lado de n8n — no es una simulacion.
+// Contrato confirmado por TRAI (CityPhone_Webhooks_Backend.txt): "imagen" es
+// obligatoria (URL publica o base64 sin prefijo), "fecha_programada" solo se
+// exige cuando modo_publicacion es "programado", y url_publicacion en la
+// respuesta SIEMPRE viene null en este paso (no hay endpoint aun para
+// resolver el link real, ver post_id en la respuesta).
 router.post('/cm/publicar-contenido', requireRole('admin', 'community_manager'), async (req, res) => {
   if (!validarEmpresa(req, res)) return;
-  const faltan = faltantes(req.body, ['red_social', 'tipo_publicacion', 'hook', 'descripcion', 'cta']);
+  const faltan = faltantes(req.body, ['red_social', 'tipo_publicacion', 'hook', 'descripcion', 'cta', 'imagen']);
   if (faltan.length) return res.status(400).json({ error: `Faltan campos: ${faltan.join(', ')}.` });
+  if (req.body.modo_publicacion === 'programado' && !req.body.fecha_programada) {
+    return res.status(400).json({ error: 'fecha_programada es requerida cuando modo_publicacion es "programado".' });
+  }
 
   await relayarWebhook(res, process.env.N8N_WEBHOOK_CM_PUBLICAR, {
     ...contexto(req),
@@ -117,7 +125,9 @@ router.post('/cm/publicar-contenido', requireRole('admin', 'community_manager'),
     hook: req.body.hook,
     descripcion: req.body.descripcion,
     cta: req.body.cta,
-    contenido_previo: req.body.contenido_previo ?? [],
+    imagen: req.body.imagen,
+    modo_publicacion: req.body.modo_publicacion || 'inmediato',
+    fecha_programada: req.body.fecha_programada || null,
   });
 });
 

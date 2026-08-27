@@ -540,6 +540,7 @@ CREATE TABLE publicaciones (
   imagen_url        text,
   estado            estado_publicacion NOT NULL DEFAULT 'pendiente',
   url_publicacion   text,
+  post_id           text,
   fecha_programada  timestamptz,
   creado_por        uuid REFERENCES usuarios(id),
   created_at        timestamptz NOT NULL DEFAULT now(),

@@ -13,7 +13,7 @@ router.get('/', async (req, res) => {
   const { estado, plataforma, desde, hasta } = req.query;
   const { rows } = await pool.query(
     `SELECT p.id, p.plataforma, p.tipo_contenido, p.hook, p.contenido_texto, p.cta, p.hashtags,
-            p.imagen_url, p.estado, p.url_publicacion, p.fecha_programada, p.producto_id, pr.nombre AS producto_nombre,
+            p.imagen_url, p.estado, p.url_publicacion, p.post_id, p.fecha_programada, p.producto_id, pr.nombre AS producto_nombre,
             p.promocion_id, promo.nombre AS promocion_nombre, p.creado_por, u.nombre AS creado_por_nombre,
             p.created_at, p.updated_at
      FROM publicaciones p
@@ -33,7 +33,7 @@ router.get('/', async (req, res) => {
 router.get('/:id', async (req, res) => {
   const { rows } = await pool.query(
     `SELECT p.id, p.plataforma, p.tipo_contenido, p.hook, p.contenido_texto, p.cta, p.hashtags,
-            p.imagen_url, p.estado, p.url_publicacion, p.fecha_programada, p.producto_id, pr.nombre AS producto_nombre,
+            p.imagen_url, p.estado, p.url_publicacion, p.post_id, p.fecha_programada, p.producto_id, pr.nombre AS producto_nombre,
             p.promocion_id, promo.nombre AS promocion_nombre, p.creado_por, u.nombre AS creado_por_nombre,
             p.created_at, p.updated_at
      FROM publicaciones p
@@ -50,7 +50,7 @@ router.get('/:id', async (req, res) => {
 router.post('/', async (req, res) => {
   const {
     plataforma, tipo_contenido, hook, contenido_texto, cta, hashtags, imagen_url, producto_id, promocion_id, fecha_programada,
-    estado, url_publicacion,
+    estado, url_publicacion, post_id,
   } = req.body ?? {};
 
   if (!PLATAFORMAS_VALIDAS.includes(plataforma)) {
@@ -72,9 +72,9 @@ router.post('/', async (req, res) => {
 
   const { rows } = await pool.query(
     `INSERT INTO publicaciones
-       (plataforma, tipo_contenido, hook, contenido_texto, cta, hashtags, imagen_url, producto_id, promocion_id, fecha_programada, creado_por, estado, url_publicacion)
-     VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, COALESCE($12, 'pendiente'), $13)
-     RETURNING id, plataforma, tipo_contenido, hook, contenido_texto, cta, hashtags, imagen_url, estado, url_publicacion,
+       (plataforma, tipo_contenido, hook, contenido_texto, cta, hashtags, imagen_url, producto_id, promocion_id, fecha_programada, creado_por, estado, url_publicacion, post_id)
+     VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, COALESCE($12, 'pendiente'), $13, $14)
+     RETURNING id, plataforma, tipo_contenido, hook, contenido_texto, cta, hashtags, imagen_url, estado, url_publicacion, post_id,
                fecha_programada, producto_id, promocion_id, creado_por, created_at`,
     [
       plataforma,
@@ -90,6 +90,7 @@ router.post('/', async (req, res) => {
       req.usuario.sub,
       estado || null,
       url_publicacion || null,
+      post_id || null,
     ]
   );
   res.status(201).json(rows[0]);
