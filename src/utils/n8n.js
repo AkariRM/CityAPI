@@ -1,4 +1,7 @@
-const TIMEOUT_MS = 25000;
+// Probado contra los webhooks reales de TRAI: la mayoria responde en
+// segundos, pero "mejorar imagen" (cambio de fondo) tardo ~33s — 25s se
+// quedaba corto y lo tumbaba con un timeout aunque si estaba funcionando.
+const TIMEOUT_MS = 60000;
 
 // Llama a un webhook de n8n para una de las automatizaciones de IA.
 // Un solo lugar para: header de autenticacion saliente (X-Webhook-Secret),
