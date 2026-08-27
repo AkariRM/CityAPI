@@ -13,7 +13,7 @@ router.get('/', async (req, res) => {
   const { estado, plataforma, desde, hasta } = req.query;
   const { rows } = await pool.query(
     `SELECT p.id, p.plataforma, p.tipo_contenido, p.hook, p.contenido_texto, p.cta, p.hashtags,
-            p.imagen_url, p.estado, p.fecha_programada, p.producto_id, pr.nombre AS producto_nombre,
+            p.imagen_url, p.estado, p.url_publicacion, p.fecha_programada, p.producto_id, pr.nombre AS producto_nombre,
             p.promocion_id, promo.nombre AS promocion_nombre, p.creado_por, u.nombre AS creado_por_nombre,
             p.created_at, p.updated_at
      FROM publicaciones p
@@ -33,7 +33,7 @@ router.get('/', async (req, res) => {
 router.get('/:id', async (req, res) => {
   const { rows } = await pool.query(
     `SELECT p.id, p.plataforma, p.tipo_contenido, p.hook, p.contenido_texto, p.cta, p.hashtags,
-            p.imagen_url, p.estado, p.fecha_programada, p.producto_id, pr.nombre AS producto_nombre,
+            p.imagen_url, p.estado, p.url_publicacion, p.fecha_programada, p.producto_id, pr.nombre AS producto_nombre,
             p.promocion_id, promo.nombre AS promocion_nombre, p.creado_por, u.nombre AS creado_por_nombre,
             p.created_at, p.updated_at
      FROM publicaciones p
@@ -48,8 +48,10 @@ router.get('/:id', async (req, res) => {
 });
 
 router.post('/', async (req, res) => {
-  const { plataforma, tipo_contenido, hook, contenido_texto, cta, hashtags, imagen_url, producto_id, promocion_id, fecha_programada } =
-    req.body ?? {};
+  const {
+    plataforma, tipo_contenido, hook, contenido_texto, cta, hashtags, imagen_url, producto_id, promocion_id, fecha_programada,
+    estado, url_publicacion,
+  } = req.body ?? {};
 
   if (!PLATAFORMAS_VALIDAS.includes(plataforma)) {
     return res.status(400).json({ error: 'plataforma debe ser instagram o facebook.' });
@@ -60,12 +62,19 @@ router.post('/', async (req, res) => {
   if (hashtags !== undefined && hashtags !== null && !Array.isArray(hashtags)) {
     return res.status(400).json({ error: 'hashtags debe ser una lista de texto.' });
   }
+  // "programado"/"rechazado" solo tienen sentido como transicion de un
+  // pendiente ya existente (via /:id/aprobar, /:id/rechazar) — al crear solo
+  // se permite el default "pendiente" (flujo manual) o "publicado" (caso de
+  // /cm/publicar-contenido, que ya publico de verdad antes de guardar el registro).
+  if (estado !== undefined && !['pendiente', 'publicado'].includes(estado)) {
+    return res.status(400).json({ error: 'estado inválido: solo "pendiente" o "publicado" al crear.' });
+  }
 
   const { rows } = await pool.query(
     `INSERT INTO publicaciones
-       (plataforma, tipo_contenido, hook, contenido_texto, cta, hashtags, imagen_url, producto_id, promocion_id, fecha_programada, creado_por)
-     VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11)
-     RETURNING id, plataforma, tipo_contenido, hook, contenido_texto, cta, hashtags, imagen_url, estado,
+       (plataforma, tipo_contenido, hook, contenido_texto, cta, hashtags, imagen_url, producto_id, promocion_id, fecha_programada, creado_por, estado, url_publicacion)
+     VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, COALESCE($12, 'pendiente'), $13)
+     RETURNING id, plataforma, tipo_contenido, hook, contenido_texto, cta, hashtags, imagen_url, estado, url_publicacion,
                fecha_programada, producto_id, promocion_id, creado_por, created_at`,
     [
       plataforma,
@@ -79,6 +88,8 @@ router.post('/', async (req, res) => {
       promocion_id || null,
       fecha_programada || null,
       req.usuario.sub,
+      estado || null,
+      url_publicacion || null,
     ]
   );
   res.status(201).json(rows[0]);
