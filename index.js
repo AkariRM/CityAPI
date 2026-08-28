@@ -45,6 +45,7 @@ const aureaCortesCajaRoutes = require('./src/routes/aureaCortesCaja.routes');
 const aureaConfiguracionRoutes = require('./src/routes/aureaConfiguracion.routes');
 const aureaReportesRoutes = require('./src/routes/aureaReportes.routes');
 const n8nRoutes = require('./src/routes/n8n.routes');
+const catalogoExternoRoutes = require('./src/routes/catalogoExterno.routes');
 
 const app = express();
 
@@ -133,6 +134,7 @@ app.use('/aurea/cortes-caja', aureaCortesCajaRoutes);
 app.use('/aurea/configuracion-ticket', aureaConfiguracionRoutes);
 app.use('/aurea/reportes', aureaReportesRoutes);
 app.use('/n8n', n8nRoutes);
+app.use('/catalogo-externo', catalogoExternoRoutes);
 
 app.use((req, res) => {
   res.status(404).json({ error: 'Ruta no encontrada.' });
