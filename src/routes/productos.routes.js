@@ -79,6 +79,35 @@ router.get('/movimientos', requireRole('admin', 'vendedor'), async (req, res) =>
   res.json(rows);
 });
 
+// Exporta el catalogo como CSV para compartir con terceros (ej. la agencia
+// que arma las automatizaciones de marketing) como referencia de datos
+// reales — deliberadamente excluye costo/precio_mayoreo/precio_revendedor/
+// proveedor/stock, que son datos internos del negocio, no algo para salir
+// de la empresa.
+router.get('/export', requireRole('admin', 'vendedor', 'community_manager'), async (req, res) => {
+  const { rows } = await pool.query(
+    `SELECT p.sku, p.nombre, p.tipo, c.nombre AS categoria, p.marca, p.modelo, p.precio_venta, p.imagen_url
+     FROM productos p
+     LEFT JOIN categorias c ON c.id = p.categoria_id
+     WHERE p.activo = true
+     ORDER BY p.nombre`
+  );
+
+  function csvCampo(valor) {
+    const texto = valor === null || valor === undefined ? '' : String(valor);
+    return /[",\n]/.test(texto) ? `"${texto.replace(/"/g, '""')}"` : texto;
+  }
+
+  const encabezado = ['sku', 'nombre', 'tipo', 'categoria', 'marca', 'modelo', 'precio_venta', 'imagen_url'];
+  const lineas = rows.map((r) => encabezado.map((campo) => csvCampo(r[campo])).join(','));
+  const csv = '﻿' + [encabezado.join(','), ...lineas].join('\r\n');
+
+  const fecha = new Date().toISOString().slice(0, 10);
+  res.setHeader('Content-Type', 'text/csv; charset=utf-8');
+  res.setHeader('Content-Disposition', `attachment; filename="catalogo-cityphone-${fecha}.csv"`);
+  res.send(csv);
+});
+
 router.post('/', requireRole('admin', 'vendedor'), async (req, res) => {
   const {
     sku, nombre, categoria_id, tipo, marca, modelo, ram, almacenamiento, procesador, usa_imei,
