@@ -60,7 +60,9 @@ router.get('/', requireRole('admin', 'vendedor', 'tecnico', 'community_manager')
 // busqueda por id.
 router.get('/movimientos', requireRole('admin', 'vendedor'), async (req, res) => {
   const { sucursal_id, producto_id, desde, hasta } = req.query;
-  if (!sucursal_id) return res.status(400).json({ error: 'sucursal_id es requerido.' });
+  // Admin y dueño pueden omitir sucursal_id (ven el historial combinado de
+  // todas las sucursales); vendedor lo sigue necesitando, igual que siempre.
+  if (!sucursal_id && !esAdminODueno(req.usuario.rol)) return res.status(400).json({ error: 'sucursal_id es requerido.' });
 
   const { rows } = await pool.query(
     `SELECT m.id, m.producto_id, p.nombre AS producto_nombre, m.tipo, m.cantidad, m.motivo,
@@ -68,13 +70,13 @@ router.get('/movimientos', requireRole('admin', 'vendedor'), async (req, res) =>
      FROM movimientos_inventario m
      JOIN productos p ON p.id = m.producto_id
      LEFT JOIN usuarios u ON u.id = m.usuario_id
-     WHERE m.sucursal_id = $1
+     WHERE ($1::uuid IS NULL OR m.sucursal_id = $1::uuid)
        AND ($2::uuid IS NULL OR m.producto_id = $2::uuid)
        AND ($3::timestamptz IS NULL OR m.created_at >= $3::timestamptz)
        AND ($4::timestamptz IS NULL OR m.created_at < $4::timestamptz)
      ORDER BY m.created_at DESC
      LIMIT 200`,
-    [sucursal_id, producto_id || null, desde ? inicioDiaUTC(desde) : null, hasta ? finDiaUTCExclusivo(hasta) : null]
+    [sucursal_id || null, producto_id || null, desde ? inicioDiaUTC(desde) : null, hasta ? finDiaUTCExclusivo(hasta) : null]
   );
   res.json(rows);
 });

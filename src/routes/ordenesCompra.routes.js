@@ -1,13 +1,15 @@
 const express = require('express');
 const { pool } = require('../db');
-const { requireAuth, requireRole } = require('../middleware/auth');
+const { requireAuth, requireRole, esAdminODueno } = require('../middleware/auth');
 
 const router = express.Router();
 router.use(requireAuth, requireRole('admin', 'vendedor'));
 
 router.get('/', async (req, res) => {
   const { sucursal_id, proveedor_id, estado } = req.query;
-  if (!sucursal_id) return res.status(400).json({ error: 'sucursal_id es requerido.' });
+  // Admin y dueño pueden omitir sucursal_id (ven las ordenes de todas las
+  // sucursales); vendedor lo sigue necesitando, igual que siempre.
+  if (!sucursal_id && !esAdminODueno(req.usuario.rol)) return res.status(400).json({ error: 'sucursal_id es requerido.' });
 
   const { rows } = await pool.query(
     `SELECT o.id, o.proveedor_id, pv.nombre AS proveedor_nombre, o.producto_id, p.nombre AS producto_nombre,
@@ -15,11 +17,11 @@ router.get('/', async (req, res) => {
      FROM ordenes_compra o
      JOIN proveedores pv ON pv.id = o.proveedor_id
      JOIN productos p ON p.id = o.producto_id
-     WHERE o.sucursal_id = $1
+     WHERE ($1::uuid IS NULL OR o.sucursal_id = $1::uuid)
        AND ($2::uuid IS NULL OR o.proveedor_id = $2::uuid)
        AND ($3::text IS NULL OR o.estado::text = $3)
      ORDER BY o.created_at DESC`,
-    [sucursal_id, proveedor_id || null, estado || null]
+    [sucursal_id || null, proveedor_id || null, estado || null]
   );
   res.json(rows);
 });
