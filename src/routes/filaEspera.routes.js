@@ -1,6 +1,6 @@
 const express = require('express');
 const { pool } = require('../db');
-const { requireAuth, requireRole } = require('../middleware/auth');
+const { requireAuth, requireRole, esAdminODueno } = require('../middleware/auth');
 const { inicioDiaUTC, finDiaUTCExclusivo, hoyLocal } = require('../utils/fechas');
 
 const router = express.Router();
@@ -8,26 +8,29 @@ router.use(requireAuth, requireRole('admin', 'vendedor'));
 
 router.get('/', async (req, res) => {
   const { sucursal_id } = req.query;
-  if (!sucursal_id) return res.status(400).json({ error: 'sucursal_id es requerido.' });
+  if (!sucursal_id && !esAdminODueno(req.usuario.rol)) {
+    return res.status(400).json({ error: 'sucursal_id es requerido.' });
+  }
 
   const hoy = hoyLocal();
   const desdeUTC = inicioDiaUTC(hoy);
   const hastaUTC = finDiaUTCExclusivo(hoy);
 
   const activos = await pool.query(
-    `SELECT id, nombre, motivo, atendido, created_at
-     FROM fila_espera
-     WHERE sucursal_id = $1 AND atendido = false
-     ORDER BY created_at ASC`,
-    [sucursal_id]
+    `SELECT fe.id, fe.nombre, fe.motivo, fe.atendido, fe.created_at, s.nombre AS sucursal_nombre
+     FROM fila_espera fe
+     JOIN sucursales s ON s.id = fe.sucursal_id
+     WHERE ($1::uuid IS NULL OR fe.sucursal_id = $1::uuid) AND fe.atendido = false
+     ORDER BY fe.created_at ASC`,
+    [sucursal_id || null]
   );
 
   const atendidosHoy = await pool.query(
     `SELECT count(*)::int AS cantidad
      FROM fila_espera
-     WHERE sucursal_id = $1 AND atendido = true
+     WHERE ($1::uuid IS NULL OR sucursal_id = $1::uuid) AND atendido = true
        AND atendido_at >= $2::timestamptz AND atendido_at < $3::timestamptz`,
-    [sucursal_id, desdeUTC, hastaUTC]
+    [sucursal_id || null, desdeUTC, hastaUTC]
   );
 
   res.json({ activos: activos.rows, atendidos_hoy: atendidosHoy.rows[0].cantidad });
