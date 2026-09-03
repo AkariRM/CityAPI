@@ -41,4 +41,30 @@ async function subirBufferABucket(buffer, mimeType) {
   return { url: data.publicUrl };
 }
 
-module.exports = { subirBufferABucket, EXTENSIONES };
+// Verifica el contenido real del archivo por su firma binaria ("magic
+// bytes") en vez de confiar en el Content-Type que manda el navegador, que
+// cualquiera puede falsificar (ej. subir un .html declarando "soy
+// image/jpeg"). Devuelve el mimetype real detectado, o null si no es
+// ninguno de los formatos que aceptamos — quien llama debe rechazar el
+// archivo en ese caso, nunca usar el mimetype declarado por el cliente.
+function detectarTipoReal(buffer) {
+  if (buffer.length >= 3 && buffer[0] === 0xff && buffer[1] === 0xd8 && buffer[2] === 0xff) {
+    return 'image/jpeg';
+  }
+  if (
+    buffer.length >= 8 &&
+    buffer.subarray(0, 8).equals(Buffer.from([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a]))
+  ) {
+    return 'image/png';
+  }
+  if (
+    buffer.length >= 12 &&
+    buffer.subarray(0, 4).toString('ascii') === 'RIFF' &&
+    buffer.subarray(8, 12).toString('ascii') === 'WEBP'
+  ) {
+    return 'image/webp';
+  }
+  return null;
+}
+
+module.exports = { subirBufferABucket, EXTENSIONES, detectarTipoReal };

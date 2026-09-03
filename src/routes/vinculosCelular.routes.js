@@ -2,7 +2,7 @@ const express = require('express');
 const multer = require('multer');
 const { pool } = require('../db');
 const { requireAuth } = require('../middleware/auth');
-const { subirBufferABucket, EXTENSIONES } = require('../utils/almacenamiento');
+const { subirBufferABucket, EXTENSIONES, detectarTipoReal } = require('../utils/almacenamiento');
 
 const router = express.Router();
 
@@ -93,8 +93,15 @@ router.post('/:id/fotos', (req, res) => {
       return res.status(410).json({ error: 'Este vínculo ya no está activo.' });
     }
 
+    // El Content-Type que manda el navegador se puede falsificar — aqui
+    // importa mas que en /uploads/imagen porque este endpoint no pide
+    // sesion, cualquiera con el vinculo puede llamarlo. Se revisa el
+    // contenido real del archivo y se usa ese tipo verificado al subirlo.
+    const tipoReal = detectarTipoReal(req.file.buffer);
+    if (!tipoReal) return res.status(400).json({ error: 'El archivo no es una imagen válida (JPG, PNG o WEBP).' });
+
     try {
-      const { url } = await subirBufferABucket(req.file.buffer, req.file.mimetype);
+      const { url } = await subirBufferABucket(req.file.buffer, tipoReal);
       await pool.query(`INSERT INTO vinculo_fotos (vinculo_id, imagen_url) VALUES ($1, $2)`, [req.params.id, url]);
       res.status(201).json({ ok: true });
     } catch (subidaErr) {

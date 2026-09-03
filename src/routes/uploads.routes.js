@@ -1,7 +1,7 @@
 const express = require('express');
 const multer = require('multer');
 const { requireAuth, requireRole } = require('../middleware/auth');
-const { subirBufferABucket, EXTENSIONES } = require('../utils/almacenamiento');
+const { subirBufferABucket, EXTENSIONES, detectarTipoReal } = require('../utils/almacenamiento');
 
 const router = express.Router();
 router.use(requireAuth, requireRole('admin', 'vendedor', 'pto'));
@@ -26,8 +26,14 @@ router.post('/imagen', (req, res) => {
     if (err) return res.status(err.statusCode ?? 400).json({ error: err.message });
     if (!req.file) return res.status(400).json({ error: 'No se recibió ninguna imagen.' });
 
+    // El Content-Type que manda el navegador se puede falsificar — se
+    // revisa el contenido real del archivo antes de subirlo, y se usa ese
+    // tipo verificado (no el declarado) para guardarlo.
+    const tipoReal = detectarTipoReal(req.file.buffer);
+    if (!tipoReal) return res.status(400).json({ error: 'El archivo no es una imagen válida (JPG, PNG o WEBP).' });
+
     try {
-      const { url } = await subirBufferABucket(req.file.buffer, req.file.mimetype);
+      const { url } = await subirBufferABucket(req.file.buffer, tipoReal);
       res.status(201).json({ url });
     } catch (subidaErr) {
       res.status(subidaErr.statusCode ?? 500).json({ error: subidaErr.message });
