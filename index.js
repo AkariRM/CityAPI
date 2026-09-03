@@ -46,6 +46,7 @@ const aureaConfiguracionRoutes = require('./src/routes/aureaConfiguracion.routes
 const aureaReportesRoutes = require('./src/routes/aureaReportes.routes');
 const n8nRoutes = require('./src/routes/n8n.routes');
 const catalogoExternoRoutes = require('./src/routes/catalogoExterno.routes');
+const contactoExternoRoutes = require('./src/routes/contactoExterno.routes');
 const vinculosCelularRoutes = require('./src/routes/vinculosCelular.routes');
 
 const app = express();
@@ -136,6 +137,7 @@ app.use('/aurea/configuracion-ticket', aureaConfiguracionRoutes);
 app.use('/aurea/reportes', aureaReportesRoutes);
 app.use('/n8n', n8nRoutes);
 app.use('/catalogo-externo', catalogoExternoRoutes);
+app.use('/contacto-externo', contactoExternoRoutes);
 app.use('/vinculos-celular', vinculosCelularRoutes);
 
 app.use((req, res) => {

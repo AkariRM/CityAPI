@@ -1,20 +1,8 @@
 const express = require('express');
 const { pool } = require('../db');
+const { verificarSecreto } = require('../middleware/webhookSecret');
 
 const router = express.Router();
-
-// A diferencia de n8n.routes.js (nosotros llamando hacia n8n), aqui es al
-// reves: un servicio externo (ej. el workflow de TRAI en n8n) nos llama a
-// nosotros para consultar el catalogo. No hay sesion de usuario de por
-// medio, asi que no se puede usar requireAuth — se valida con el mismo
-// secreto compartido que ya usamos para autenticarnos con ellos
-// (X-Webhook-Secret contra WEBHOOK_SECRET), solo que en sentido contrario.
-function verificarSecreto(req, res, next) {
-  if (!process.env.WEBHOOK_SECRET || req.headers['x-webhook-secret'] !== process.env.WEBHOOK_SECRET) {
-    return res.status(401).json({ error: 'No autorizado.' });
-  }
-  next();
-}
 
 // GET /catalogo-externo            -> catalogo completo (productos activos)
 // GET /catalogo-externo?id=uuid    -> un producto
