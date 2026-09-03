@@ -15,15 +15,17 @@ const METODOS_VALIDOS = ['efectivo', 'tarjeta', 'credito'];
 // para su propio resumen del dia en el dashboard de mostrador.
 router.get('/resumen-dia', async (req, res) => {
   const { sucursal_id, fecha } = req.query;
-  if (!sucursal_id) return res.status(400).json({ error: 'sucursal_id es requerido.' });
+  if (!sucursal_id && !esAdminODueno(req.usuario.rol)) {
+    return res.status(400).json({ error: 'sucursal_id es requerido.' });
+  }
   const dia = fecha || hoyLocal();
 
   const { rows } = await pool.query(
     `SELECT COALESCE(sum(total), 0) AS total, count(*)::int AS cantidad
      FROM ventas
-     WHERE sucursal_id = $1 AND estado = 'completada'
+     WHERE ($1::uuid IS NULL OR sucursal_id = $1::uuid) AND estado = 'completada'
        AND created_at >= $2::timestamptz AND created_at < $3::timestamptz`,
-    [sucursal_id, inicioDiaUTC(dia), finDiaUTCExclusivo(dia)]
+    [sucursal_id || null, inicioDiaUTC(dia), finDiaUTCExclusivo(dia)]
   );
   res.json({ fecha: dia, total: Number(rows[0].total), cantidad: rows[0].cantidad });
 });
@@ -35,18 +37,20 @@ router.get('/resumen-dia', async (req, res) => {
 // calendario local de Sahuayo antes de agrupar.
 router.get('/resumen-rango', async (req, res) => {
   const { sucursal_id, desde, hasta } = req.query;
-  if (!sucursal_id) return res.status(400).json({ error: 'sucursal_id es requerido.' });
+  if (!sucursal_id && !esAdminODueno(req.usuario.rol)) {
+    return res.status(400).json({ error: 'sucursal_id es requerido.' });
+  }
   if (!desde || !hasta) return res.status(400).json({ error: 'desde y hasta son requeridos (YYYY-MM-DD).' });
 
   const { rows } = await pool.query(
     `SELECT (date_trunc('day', created_at - interval '6 hours'))::date::text AS dia,
             COALESCE(sum(total), 0) AS total, count(*)::int AS cantidad
      FROM ventas
-     WHERE sucursal_id = $1 AND estado = 'completada'
+     WHERE ($1::uuid IS NULL OR sucursal_id = $1::uuid) AND estado = 'completada'
        AND created_at >= $2::timestamptz AND created_at < $3::timestamptz
      GROUP BY dia
      ORDER BY dia`,
-    [sucursal_id, inicioDiaUTC(desde), finDiaUTCExclusivo(hasta)]
+    [sucursal_id || null, inicioDiaUTC(desde), finDiaUTCExclusivo(hasta)]
   );
   res.json(rows.map((r) => ({ fecha: r.dia, total: Number(r.total), cantidad: r.cantidad })));
 });
