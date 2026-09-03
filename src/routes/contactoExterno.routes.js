@@ -20,25 +20,47 @@ router.get('/', verificarSecreto, async (req, res) => {
   }
 
   const staff = await pool.query(
-    `SELECT id, nombre, rol, telefono FROM usuarios
+    `SELECT id, nombre, rol, telefono, sucursal_id FROM usuarios
      WHERE activo = true AND right(regexp_replace(telefono, '\\D', '', 'g'), 10) = $1
      LIMIT 1`,
     [telefono]
   );
   if (staff.rows[0]) {
     const u = staff.rows[0];
-    return res.json({ id: u.id, nombre: u.nombre, rol: u.rol, telefono: u.telefono });
+    return res.json({ id: u.id, nombre: u.nombre, rol: u.rol, telefono: u.telefono, sucursal_id: u.sucursal_id });
   }
 
   const cliente = await pool.query(
-    `SELECT id, nombre, telefono FROM clientes
+    `SELECT id, nombre, telefono, sucursal_id FROM clientes
      WHERE right(regexp_replace(telefono, '\\D', '', 'g'), 10) = $1
      LIMIT 1`,
     [telefono]
   );
   if (cliente.rows[0]) {
     const c = cliente.rows[0];
-    return res.json({ id: c.id, nombre: c.nombre, rol: 'cliente', telefono: c.telefono });
+
+    // Opcionales que pidio TRAI: ultima compra (para personalizar el
+    // saludo) y folio de reparacion en curso (cualquier estado que no sea
+    // 'entregado'). El agente funciona igual si vienen null.
+    const [ultimaCompra, ticketAbierto] = await Promise.all([
+      pool.query(`SELECT max(created_at) AS fecha FROM ventas WHERE cliente_id = $1`, [c.id]),
+      pool.query(
+        `SELECT folio FROM reparaciones
+         WHERE cliente_id = $1 AND estado <> 'entregado'
+         ORDER BY created_at DESC LIMIT 1`,
+        [c.id]
+      ),
+    ]);
+
+    return res.json({
+      id: c.id,
+      nombre: c.nombre,
+      rol: 'cliente',
+      telefono: c.telefono,
+      sucursal_id: c.sucursal_id,
+      ultima_compra: ultimaCompra.rows[0]?.fecha ?? null,
+      ticket_abierto: ticketAbierto.rows[0]?.folio ?? null,
+    });
   }
 
   res.status(404).json({ error: 'Contacto no encontrado.' });
