@@ -515,12 +515,13 @@ router.post('/importar-lote', requireRole('admin', 'vendedor'), async (req, res)
       if (!item.nombre?.trim()) throw Object.assign(new Error('Nombre vacío.'), { statusCode: 400 });
 
       const producto = await client.query(
-        `INSERT INTO productos (nombre, descripcion, tipo, usa_imei, precio_venta, costo, precio_mayoreo, precio_revendedor)
-         VALUES ($1, $2, $3, true, $4, $5, $6, $7)
+        `INSERT INTO productos (nombre, descripcion, color, tipo, usa_imei, precio_venta, costo, precio_mayoreo, precio_revendedor)
+         VALUES ($1, $2, $3, $4, true, $5, $6, $7, $8)
          RETURNING id`,
         [
           item.nombre.trim(),
           item.descripcion || null,
+          item.color || null,
           tipo,
           Number(item.precio_venta) || 0,
           Number(item.costo) || 0,
