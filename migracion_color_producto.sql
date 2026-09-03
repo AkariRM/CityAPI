@@ -1,0 +1,16 @@
+-- Campo de color separado del nombre — antes iba todo mezclado en
+-- productos.nombre (ej. "APPLE 17 PRO MAX LIBRE BLANCO NCA 256 ESIM"), lo
+-- que hacía imposible agrupar variantes del mismo modelo de forma
+-- confiable en Punto de venta. A partir de ahora el formulario de equipos
+-- pide el color aparte.
+--
+-- Deliberadamente NO incluyo aquí un backfill automático que intente
+-- separar el color de los nombres ya existentes: los nombres de color
+-- reales de los celulares (ej. "Titanio Natural", "Azul Pacífico",
+-- "Medianoche") varían demasiado para adivinarlos con una lista fija sin
+-- arriesgarme a mutilar nombres reales en producción. Los equipos ya
+-- registrados simplemente no agrupan hasta que se edite cada uno (desde su
+-- tarjeta → "Editar equipo") separando el color a mano — es rápido de
+-- hacer poco a poco, y no hay urgencia: mientras tanto siguen viéndose
+-- exactamente igual que hoy.
+ALTER TABLE productos ADD COLUMN IF NOT EXISTS color text;

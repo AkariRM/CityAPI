@@ -26,7 +26,7 @@ router.get('/', requireRole('admin', 'vendedor', 'tecnico', 'community_manager')
   // siempre. precio_lista y precio_especial se mandan aparte para poder
   // mostrar en pantalla que un precio es especial.
   const { rows } = await pool.query(
-    `SELECT p.id, p.sku, p.nombre, p.tipo, p.marca, p.modelo, p.ram, p.almacenamiento, p.procesador,
+    `SELECT p.id, p.sku, p.nombre, p.tipo, p.marca, p.modelo, p.ram, p.almacenamiento, p.procesador, p.color,
             p.usa_imei, p.activo, p.costo, p.precio_mayoreo, p.precio_revendedor,
             p.precio_venta AS precio_lista,
             COALESCE(pe_cliente.precio, pe_rol.precio, p.precio_venta) AS precio_venta,
@@ -112,7 +112,7 @@ router.get('/export', requireRole('admin', 'vendedor', 'community_manager'), asy
 
 router.post('/', requireRole('admin', 'vendedor'), async (req, res) => {
   const {
-    sku, nombre, categoria_id, tipo, marca, modelo, ram, almacenamiento, procesador, usa_imei,
+    sku, nombre, categoria_id, tipo, marca, modelo, ram, almacenamiento, procesador, color, usa_imei,
     precio_venta, costo, precio_mayoreo, precio_revendedor, imagen_url, proveedor_id, sucursal_id, stock_inicial,
   } = req.body ?? {};
   if (!nombre?.trim()) return res.status(400).json({ error: 'El nombre es requerido.' });
@@ -128,12 +128,12 @@ router.post('/', requireRole('admin', 'vendedor'), async (req, res) => {
     await client.query('BEGIN');
 
     const producto = await client.query(
-      `INSERT INTO productos (sku, nombre, categoria_id, tipo, marca, modelo, ram, almacenamiento, procesador, usa_imei, precio_venta, costo, precio_mayoreo, precio_revendedor, imagen_url, proveedor_id)
-       VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16)
-       RETURNING id, sku, nombre, categoria_id, tipo, marca, modelo, ram, almacenamiento, procesador, usa_imei, precio_venta, costo, precio_mayoreo, precio_revendedor, imagen_url, proveedor_id, activo`,
+      `INSERT INTO productos (sku, nombre, categoria_id, tipo, marca, modelo, ram, almacenamiento, procesador, color, usa_imei, precio_venta, costo, precio_mayoreo, precio_revendedor, imagen_url, proveedor_id)
+       VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $17)
+       RETURNING id, sku, nombre, categoria_id, tipo, marca, modelo, ram, almacenamiento, procesador, color, usa_imei, precio_venta, costo, precio_mayoreo, precio_revendedor, imagen_url, proveedor_id, activo`,
       [
         sku || null, nombre.trim(), categoria_id || null, tipo, marca || null, modelo || null,
-        ram || null, almacenamiento || null, procesador || null, usa_imei === false ? false : true,
+        ram || null, almacenamiento || null, procesador || null, color || null, usa_imei === false ? false : true,
         precio_venta ?? 0, costo ?? 0, precio_mayoreo ?? null, precio_revendedor ?? null, imagen_url || null, proveedor_id || null,
       ]
     );
@@ -180,6 +180,7 @@ router.patch('/:id', requireRole('admin', 'vendedor'), async (req, res) => {
     ram: req.body?.ram,
     almacenamiento: req.body?.almacenamiento,
     procesador: req.body?.procesador,
+    color: req.body?.color,
     usa_imei: req.body?.usa_imei,
     proveedor_id: req.body?.proveedor_id,
     imagen_url: req.body?.imagen_url,
@@ -199,7 +200,7 @@ router.patch('/:id', requireRole('admin', 'vendedor'), async (req, res) => {
   values.push(req.params.id);
   const { rows } = await pool.query(
     `UPDATE productos SET ${sets.join(', ')} WHERE id = $${i}
-     RETURNING id, sku, nombre, categoria_id, tipo, marca, modelo, ram, almacenamiento, procesador, usa_imei, precio_venta, costo, precio_mayoreo, precio_revendedor, imagen_url, proveedor_id, activo`,
+     RETURNING id, sku, nombre, categoria_id, tipo, marca, modelo, ram, almacenamiento, procesador, color, usa_imei, precio_venta, costo, precio_mayoreo, precio_revendedor, imagen_url, proveedor_id, activo`,
     values
   );
   if (!rows[0]) return res.status(404).json({ error: 'Producto no encontrado.' });
@@ -359,6 +360,125 @@ router.delete('/:id/unidades/:unidadId', requireRole('admin', 'vendedor'), async
        VALUES ($1, $2, 'salida', 1, 'Baja de unidad IMEI', 'unidad_imei', $3, $4)`,
       [req.params.id, unidad.sucursal_id, unidad.id, req.usuario.sub]
     );
+
+    await client.query('COMMIT');
+    res.json({ ok: true });
+  } catch (err) {
+    await client.query('ROLLBACK');
+    res.status(err.statusCode ?? 500).json({ error: err.statusCode ? err.message : 'Error interno del servidor.' });
+    if (!err.statusCode) console.error(err);
+  } finally {
+    client.release();
+  }
+});
+
+const MAX_IMAGENES_PRODUCTO = 10;
+
+router.get('/:id/imagenes', requireRole('admin', 'vendedor', 'tecnico', 'community_manager'), async (req, res) => {
+  const { rows } = await pool.query(
+    `SELECT id, imagen_url, es_principal, orden, created_at
+     FROM producto_imagenes WHERE producto_id = $1 ORDER BY orden ASC, created_at ASC`,
+    [req.params.id]
+  );
+  res.json(rows);
+});
+
+// La primera imagen que se sube a un producto queda como principal
+// automaticamente — el cliente no elige eso aqui, es un PATCH aparte
+// (.../principal) para cambiarla despues. "orden" es simplemente el conteo
+// actual, asi que cada imagen nueva se agrega al final.
+router.post('/:id/imagenes', requireRole('admin', 'vendedor'), async (req, res) => {
+  const { imagen_url } = req.body ?? {};
+  if (!imagen_url) return res.status(400).json({ error: 'imagen_url es requerida.' });
+
+  const client = await pool.connect();
+  try {
+    await client.query('BEGIN');
+
+    const actuales = await client.query(
+      `SELECT count(*)::int AS total FROM producto_imagenes WHERE producto_id = $1`,
+      [req.params.id]
+    );
+    const total = actuales.rows[0].total;
+    if (total >= MAX_IMAGENES_PRODUCTO) {
+      throw Object.assign(new Error(`Un producto no puede tener más de ${MAX_IMAGENES_PRODUCTO} imágenes.`), { statusCode: 400 });
+    }
+    const esPrincipal = total === 0;
+
+    const { rows } = await client.query(
+      `INSERT INTO producto_imagenes (producto_id, imagen_url, es_principal, orden)
+       VALUES ($1, $2, $3, $4)
+       RETURNING id, imagen_url, es_principal, orden, created_at`,
+      [req.params.id, imagen_url, esPrincipal, total]
+    );
+
+    if (esPrincipal) {
+      await client.query(`UPDATE productos SET imagen_url = $1, updated_at = now() WHERE id = $2`, [imagen_url, req.params.id]);
+    }
+
+    await client.query('COMMIT');
+    res.status(201).json(rows[0]);
+  } catch (err) {
+    await client.query('ROLLBACK');
+    res.status(err.statusCode ?? 500).json({ error: err.statusCode ? err.message : 'Error interno del servidor.' });
+    if (!err.statusCode) console.error(err);
+  } finally {
+    client.release();
+  }
+});
+
+router.patch('/:id/imagenes/:imagenId/principal', requireRole('admin', 'vendedor'), async (req, res) => {
+  const client = await pool.connect();
+  try {
+    await client.query('BEGIN');
+
+    const { rows } = await client.query(
+      `SELECT imagen_url FROM producto_imagenes WHERE id = $1 AND producto_id = $2`,
+      [req.params.imagenId, req.params.id]
+    );
+    if (!rows[0]) throw Object.assign(new Error('Imagen no encontrada.'), { statusCode: 404 });
+
+    await client.query(`UPDATE producto_imagenes SET es_principal = false WHERE producto_id = $1`, [req.params.id]);
+    await client.query(`UPDATE producto_imagenes SET es_principal = true WHERE id = $1`, [req.params.imagenId]);
+    await client.query(`UPDATE productos SET imagen_url = $1, updated_at = now() WHERE id = $2`, [rows[0].imagen_url, req.params.id]);
+
+    await client.query('COMMIT');
+    res.json({ ok: true });
+  } catch (err) {
+    await client.query('ROLLBACK');
+    res.status(err.statusCode ?? 500).json({ error: err.statusCode ? err.message : 'Error interno del servidor.' });
+    if (!err.statusCode) console.error(err);
+  } finally {
+    client.release();
+  }
+});
+
+// Si la imagen borrada era la principal, la siguiente por orden la
+// sustituye automaticamente — un producto con al menos una imagen siempre
+// tiene exactamente una principal. Si era la unica, imagen_url queda null.
+router.delete('/:id/imagenes/:imagenId', requireRole('admin', 'vendedor'), async (req, res) => {
+  const client = await pool.connect();
+  try {
+    await client.query('BEGIN');
+
+    const { rows } = await client.query(
+      `DELETE FROM producto_imagenes WHERE id = $1 AND producto_id = $2 RETURNING es_principal`,
+      [req.params.imagenId, req.params.id]
+    );
+    if (!rows[0]) throw Object.assign(new Error('Imagen no encontrada.'), { statusCode: 404 });
+
+    if (rows[0].es_principal) {
+      const siguiente = await client.query(
+        `SELECT id, imagen_url FROM producto_imagenes WHERE producto_id = $1 ORDER BY orden ASC, created_at ASC LIMIT 1`,
+        [req.params.id]
+      );
+      if (siguiente.rows[0]) {
+        await client.query(`UPDATE producto_imagenes SET es_principal = true WHERE id = $1`, [siguiente.rows[0].id]);
+        await client.query(`UPDATE productos SET imagen_url = $1, updated_at = now() WHERE id = $2`, [siguiente.rows[0].imagen_url, req.params.id]);
+      } else {
+        await client.query(`UPDATE productos SET imagen_url = NULL, updated_at = now() WHERE id = $1`, [req.params.id]);
+      }
+    }
 
     await client.query('COMMIT');
     res.json({ ok: true });

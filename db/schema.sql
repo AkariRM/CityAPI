@@ -188,6 +188,7 @@ CREATE TABLE productos (
   ram            text,
   almacenamiento text,
   procesador     text,
+  color          text,
   usa_imei       boolean NOT NULL DEFAULT true,
   descripcion    text,
   precio_venta   numeric(12,2) NOT NULL DEFAULT 0,
@@ -203,6 +204,24 @@ CREATE TABLE productos (
 CREATE INDEX idx_productos_categoria ON productos(categoria_id);
 CREATE INDEX idx_productos_tipo ON productos(tipo);
 CREATE INDEX idx_productos_proveedor ON productos(proveedor_id);
+
+-- Galeria de imagenes por producto (hasta 10, aplicado por la API, no por
+-- una restriccion de la tabla). productos.imagen_url sigue existiendo y
+-- siempre refleja la fila con es_principal = true de aqui — es un cache
+-- desnormalizado a proposito para que todo lo que ya lee imagen_url
+-- directo (calcomanias, marketplace, ProductImage) siga funcionando sin
+-- cambios. El indice unico parcial garantiza una sola principal por producto
+-- a nivel de base de datos, no solo por disciplina de la API.
+CREATE TABLE producto_imagenes (
+  id           uuid PRIMARY KEY DEFAULT gen_random_uuid(),
+  producto_id  uuid NOT NULL REFERENCES productos(id) ON DELETE CASCADE,
+  imagen_url   text NOT NULL,
+  es_principal boolean NOT NULL DEFAULT false,
+  orden        integer NOT NULL DEFAULT 0,
+  created_at   timestamptz NOT NULL DEFAULT now()
+);
+CREATE INDEX idx_producto_imagenes_producto ON producto_imagenes(producto_id);
+CREATE UNIQUE INDEX idx_producto_imagenes_principal_unica ON producto_imagenes(producto_id) WHERE es_principal;
 
 -- Existencia agregada por sucursal. Esta es la cifra de verdad de "cuantos hay",
 -- independientemente de si se les asigno IMEI individual o no.
