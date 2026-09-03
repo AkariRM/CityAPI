@@ -1,6 +1,6 @@
 const express = require('express');
 const { pool } = require('../db');
-const { requireAuth, requireRole } = require('../middleware/auth');
+const { requireAuth, requireRole, esAdminODueno } = require('../middleware/auth');
 
 const router = express.Router();
 router.use(requireAuth, requireRole('admin', 'vendedor'));
@@ -9,16 +9,18 @@ const GRADOS_VALIDOS = ['A', 'B', 'C', 'D', 'otro'];
 
 router.get('/', async (req, res) => {
   const { sucursal_id, estado } = req.query;
-  if (!sucursal_id) return res.status(400).json({ error: 'sucursal_id es requerido.' });
+  // Admin y dueño pueden omitir sucursal_id (ven las evaluaciones de todas
+  // las sucursales); vendedor lo sigue necesitando, igual que siempre.
+  if (!sucursal_id && !esAdminODueno(req.usuario.rol)) return res.status(400).json({ error: 'sucursal_id es requerido.' });
 
   const { rows } = await pool.query(
     `SELECT id, cliente_id, cliente_nombre, equipo_modelo, grado, grado_detalle, bateria_pct,
             pantalla_ok, cuerpo_ok, camaras_ok, botones_ok,
             valor_referencia, valor_ofrecido, estado, producto_id, created_at, updated_at
      FROM cambios_equipo
-     WHERE sucursal_id = $1 AND ($2::text IS NULL OR estado::text = $2)
+     WHERE ($1::uuid IS NULL OR sucursal_id = $1::uuid) AND ($2::text IS NULL OR estado::text = $2)
      ORDER BY created_at DESC`,
-    [sucursal_id, estado || null]
+    [sucursal_id || null, estado || null]
   );
   res.json(rows);
 });

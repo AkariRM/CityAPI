@@ -1,6 +1,6 @@
 const express = require('express');
 const { pool } = require('../db');
-const { requireAuth, requireRole } = require('../middleware/auth');
+const { requireAuth, requireRole, esAdminODueno } = require('../middleware/auth');
 const { inicioDiaUTC, finDiaUTCExclusivo } = require('../utils/fechas');
 
 const router = express.Router();
@@ -91,7 +91,9 @@ async function calcularResumen(sucursal_id, usuario_id) {
 // admin puede ver los de cualquiera o los de todos.
 router.get('/', async (req, res) => {
   const { sucursal_id, usuario_id, desde, hasta } = req.query;
-  if (!sucursal_id) return res.status(400).json({ error: 'sucursal_id es requerido.' });
+  // Admin y dueño pueden omitir sucursal_id (ven los cortes de todas las
+  // sucursales combinados); vendedor lo sigue necesitando, igual que siempre.
+  if (!sucursal_id && !esAdminODueno(req.usuario.rol)) return res.status(400).json({ error: 'sucursal_id es requerido.' });
 
   const usuarioFiltro = req.usuario.rol === 'vendedor' ? req.usuario.sub : usuario_id || null;
 
@@ -101,13 +103,13 @@ router.get('/', async (req, res) => {
             cc.total_credito, cc.total_sistema, cc.diferencia, cc.created_at
      FROM cortes_caja cc
      LEFT JOIN usuarios u ON u.id = cc.usuario_id
-     WHERE cc.sucursal_id = $1
+     WHERE ($1::uuid IS NULL OR cc.sucursal_id = $1::uuid)
        AND ($2::uuid IS NULL OR cc.usuario_id = $2::uuid)
        AND ($3::timestamptz IS NULL OR cc.turno_fin >= $3::timestamptz)
        AND ($4::timestamptz IS NULL OR cc.turno_fin < $4::timestamptz)
      ORDER BY cc.turno_fin DESC
      LIMIT 200`,
-    [sucursal_id, usuarioFiltro, desde ? inicioDiaUTC(desde) : null, hasta ? finDiaUTCExclusivo(hasta) : null]
+    [sucursal_id || null, usuarioFiltro, desde ? inicioDiaUTC(desde) : null, hasta ? finDiaUTCExclusivo(hasta) : null]
   );
   res.json(rows);
 });

@@ -78,9 +78,16 @@ router.get('/', async (req, res) => {
     return res.json(rows);
   }
 
-  if (!sucursal_id) return res.status(400).json({ error: 'folio o sucursal_id son requeridos.' });
-
   const esHistorial = Boolean(desde || hasta || vendedor_id);
+
+  // El listado "sin filtros" (ultimos 7 dias, usado por Cambios/Devoluciones
+  // para localizar una venta de un registro fisico) siempre necesita una
+  // sucursal especifica. El historial completo si permite que admin/dueño
+  // lo omitan (ven todas las sucursales combinadas).
+  if (!sucursal_id && !(esHistorial && esAdminODueno(req.usuario.rol))) {
+    return res.status(400).json({ error: 'folio o sucursal_id son requeridos.' });
+  }
+
   if (!esHistorial) {
     const { rows } = await pool.query(
       `SELECT v.id, v.folio, v.sucursal_id, v.subtotal, v.descuento, v.total, v.metodo_pago, v.estado, v.created_at,
@@ -104,13 +111,13 @@ router.get('/', async (req, res) => {
      FROM ventas v
      LEFT JOIN clientes c ON c.id = v.cliente_id
      LEFT JOIN usuarios u ON u.id = v.vendedor_id
-     WHERE v.sucursal_id = $1 AND v.estado = 'completada'
+     WHERE ($1::uuid IS NULL OR v.sucursal_id = $1::uuid) AND v.estado = 'completada'
        AND ($2::uuid IS NULL OR v.vendedor_id = $2::uuid)
        AND ($3::timestamptz IS NULL OR v.created_at >= $3::timestamptz)
        AND ($4::timestamptz IS NULL OR v.created_at < $4::timestamptz)
      ORDER BY v.created_at DESC
      LIMIT 500`,
-    [sucursal_id, vendedorFiltro, desde ? inicioDiaUTC(desde) : null, hasta ? finDiaUTCExclusivo(hasta) : null]
+    [sucursal_id || null, vendedorFiltro, desde ? inicioDiaUTC(desde) : null, hasta ? finDiaUTCExclusivo(hasta) : null]
   );
   res.json(rows);
 });
