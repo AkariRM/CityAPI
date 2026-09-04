@@ -69,20 +69,6 @@ router.post('/inventario/registrar-ia', requireRole('admin', 'vendedor', 'pto'),
   });
 });
 
-// 2 — Lectura de imagen de equipo por camara (IA)
-router.post('/equipo/leer-imagen-ia', requireRole('admin', 'vendedor', 'pto'), async (req, res) => {
-  if (!validarEmpresa(req, res)) return;
-  const faltan = faltantes(req.body, ['sucursal_id', 'imagen']);
-  if (faltan.length) return res.status(400).json({ error: `Faltan campos: ${faltan.join(', ')}.` });
-
-  await relayarWebhook(res, process.env.N8N_WEBHOOK_LEER_EQUIPO_IA, {
-    ...contexto(req),
-    empresa: req.body.empresa,
-    sucursal_id: req.body.sucursal_id,
-    imagen: req.body.imagen,
-  });
-});
-
 // 3 — Generacion de contenido con IA (Community Manager)
 router.post('/cm/generar-contenido', requireRole('admin', 'community_manager'), async (req, res) => {
   if (!validarEmpresa(req, res)) return;
