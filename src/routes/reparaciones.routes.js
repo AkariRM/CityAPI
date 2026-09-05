@@ -8,7 +8,7 @@ const router = express.Router();
 
 router.use(requireAuth, requireRole('admin', 'tecnico', 'vendedor'));
 
-const ESTADOS_VALIDOS = ['recibido', 'diagnostico', 'reparacion', 'listo', 'entregado'];
+const ESTADOS_VALIDOS = ['recibido', 'diagnostico', 'esperando_autorizacion', 'reparacion', 'listo', 'entregado', 'cancelado'];
 const PRIORIDADES_VALIDAS = ['baja', 'media', 'alta'];
 
 // IMPORTANTE: esta ruta especifica va ANTES de "/:id" para que Express no la
@@ -89,7 +89,8 @@ router.get('/:id', async (req, res) => {
             s.nombre AS sucursal_nombre, s.direccion AS sucursal_direccion, s.telefono AS sucursal_telefono,
             r.equipo_marca, r.equipo_modelo, r.imei_equipo, r.equipo_contrasena, r.problema_reportado, r.diagnostico,
             r.estado, r.prioridad, r.tecnico_id, t.nombre AS tecnico_nombre,
-            r.costo_mano_obra, r.costo_refacciones, r.total, r.garantia_dias, r.created_at, r.updated_at
+            r.costo_mano_obra, r.costo_refacciones, r.total, r.garantia_dias,
+            r.fecha_estimada_entrega, r.nota_para_cliente, r.created_at, r.updated_at
      FROM reparaciones r
      JOIN clientes c ON c.id = r.cliente_id
      JOIN sucursales s ON s.id = r.sucursal_id
@@ -210,6 +211,8 @@ router.patch('/:id', async (req, res) => {
     tecnico_id: req.body?.tecnico_id,
     costo_mano_obra: req.body?.costo_mano_obra,
     garantia_dias: req.body?.garantia_dias,
+    fecha_estimada_entrega: req.body?.fecha_estimada_entrega,
+    nota_para_cliente: req.body?.nota_para_cliente,
   };
   const sets = [];
   const values = [];
@@ -231,7 +234,8 @@ router.patch('/:id', async (req, res) => {
     const { rows } = await client.query(
       `UPDATE reparaciones SET ${sets.join(', ')} WHERE id = $${i}
        RETURNING id, folio, cliente_id, sucursal_id, equipo_marca, equipo_modelo, imei_equipo, problema_reportado,
-                 diagnostico, estado, prioridad, tecnico_id, costo_mano_obra, costo_refacciones, total, garantia_dias, created_at, updated_at`,
+                 diagnostico, estado, prioridad, tecnico_id, costo_mano_obra, costo_refacciones, total, garantia_dias,
+                 fecha_estimada_entrega, nota_para_cliente, created_at, updated_at`,
       values
     );
 

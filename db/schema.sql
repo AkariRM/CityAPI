@@ -42,7 +42,7 @@ CREATE TYPE estado_unidad_imei AS ENUM ('disponible', 'apartado', 'vendido', 'en
 CREATE TYPE estado_apartado AS ENUM ('activo', 'completado', 'cancelado');
 CREATE TYPE tipo_movimiento_inventario AS ENUM ('entrada', 'salida', 'ajuste', 'traspaso');
 CREATE TYPE estado_credito AS ENUM ('activo', 'pagado', 'vencido', 'cancelado');
-CREATE TYPE estado_reparacion AS ENUM ('recibido', 'diagnostico', 'reparacion', 'listo', 'entregado');
+CREATE TYPE estado_reparacion AS ENUM ('recibido', 'diagnostico', 'esperando_autorizacion', 'reparacion', 'listo', 'entregado', 'cancelado');
 CREATE TYPE prioridad_reparacion AS ENUM ('baja', 'media', 'alta');
 CREATE TYPE etiqueta_foto_reparacion AS ENUM ('antes', 'despues', 'diagnostico');
 CREATE TYPE canal_notificacion_cliente AS ENUM ('whatsapp', 'sms');
@@ -495,6 +495,12 @@ CREATE TABLE reparaciones (
   costo_refacciones  numeric(12,2) NOT NULL DEFAULT 0,
   total              numeric(12,2) NOT NULL DEFAULT 0,
   garantia_dias      integer NOT NULL DEFAULT 0,
+  fecha_estimada_entrega  timestamptz,
+  -- Texto que el agente/asesor puede leerle al cliente tal cual (ej. "ya se
+  -- reemplazo la pantalla, en pruebas finales") — separado de "diagnostico"
+  -- porque ese es lenguaje tecnico interno del tecnico, no algo para el
+  -- cliente. Null si no hay nada que decirle todavia.
+  nota_para_cliente       text,
   created_at         timestamptz NOT NULL DEFAULT now(),
   updated_at         timestamptz NOT NULL DEFAULT now()
 );
