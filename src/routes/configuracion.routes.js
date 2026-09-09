@@ -5,13 +5,17 @@ const { obtenerConfiguracionTicket } = require('../utils/configuracionTicket');
 
 const router = express.Router();
 
-router.use(requireAuth, requireRole('admin'));
+router.use(requireAuth);
 
+// Cualquier rol autenticado puede LEER la configuracion (Equipos la
+// necesita para saber si debe auto-imprimir el sticker al dar de alta un
+// equipo, sin importar que rol lo esta registrando) -- solo modificarla
+// sigue restringido a admin.
 router.get('/', async (req, res) => {
   res.json(await obtenerConfiguracionTicket());
 });
 
-router.patch('/', async (req, res) => {
+router.patch('/', requireRole('admin'), async (req, res) => {
   const actual = await obtenerConfiguracionTicket();
 
   const fields = {
@@ -21,6 +25,7 @@ router.patch('/', async (req, res) => {
     mostrar_vendedor: req.body?.mostrar_vendedor,
     mostrar_cliente: req.body?.mostrar_cliente,
     mensaje_pie: req.body?.mensaje_pie,
+    imprimir_sticker_auto_equipo: req.body?.imprimir_sticker_auto_equipo,
   };
   const sets = [];
   const values = [];

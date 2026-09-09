@@ -718,14 +718,20 @@ CREATE INDEX idx_fila_espera_sucursal ON fila_espera(sucursal_id, atendido);
 -- ============================================================================
 
 CREATE TABLE configuracion_ticket (
-  id                 uuid PRIMARY KEY DEFAULT gen_random_uuid(),
-  nombre_negocio     text NOT NULL DEFAULT 'CityPhone',
-  mostrar_direccion  boolean NOT NULL DEFAULT true,
-  mostrar_telefono   boolean NOT NULL DEFAULT true,
-  mostrar_vendedor   boolean NOT NULL DEFAULT true,
-  mostrar_cliente    boolean NOT NULL DEFAULT true,
-  mensaje_pie        text NOT NULL DEFAULT '¡Gracias por tu compra!',
-  updated_at         timestamptz NOT NULL DEFAULT now()
+  id                          uuid PRIMARY KEY DEFAULT gen_random_uuid(),
+  nombre_negocio              text NOT NULL DEFAULT 'CityPhone',
+  mostrar_direccion           boolean NOT NULL DEFAULT true,
+  mostrar_telefono            boolean NOT NULL DEFAULT true,
+  mostrar_vendedor            boolean NOT NULL DEFAULT true,
+  mostrar_cliente             boolean NOT NULL DEFAULT true,
+  mensaje_pie                 text NOT NULL DEFAULT '¡Gracias por tu compra!',
+  -- Si se imprime solo el sticker del equipo al darlo de alta en
+  -- Equipos nuevos/usados (EquipoFormModal) -- default true porque asi se
+  -- comportaba antes de que esto fuera configurable. No afecta la
+  -- calcomania de reparacion (esa siempre se imprime al recibir el equipo,
+  -- es un flujo distinto) ni el reimprimir manual desde el boton "Sticker".
+  imprimir_sticker_auto_equipo boolean NOT NULL DEFAULT true,
+  updated_at                  timestamptz NOT NULL DEFAULT now()
 );
 
 -- ============================================================================
