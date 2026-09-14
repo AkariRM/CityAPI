@@ -5,9 +5,11 @@ const { obtenerConfiguracionTicket } = require('../utils/configuracionTicket');
 
 const router = express.Router();
 
-// Solo admin/tecnico -- las piezas son cosa de taller, igual que
-// reparaciones.routes.js excluye vendedor de /refacciones.
-router.use(requireAuth, requireRole('admin', 'tecnico'));
+// Mismo set base que reparaciones.routes.js (admin/tecnico/vendedor pueden
+// VER el detalle de un folio, incluida su lista de solicitudes) -- las
+// acciones de escritura se restringen aparte, por ruta, igual que
+// reparaciones.routes.js excluye vendedor solo de /refacciones.
+router.use(requireAuth, requireRole('admin', 'tecnico', 'vendedor'));
 
 const ESTADOS_VALIDOS = ['pendiente', 'aprobada', 'rechazada', 'recibida'];
 
@@ -34,7 +36,7 @@ router.get('/', async (req, res) => {
   res.json(rows);
 });
 
-router.post('/', async (req, res) => {
+router.post('/', requireRole('admin', 'tecnico'), async (req, res) => {
   const { reparacion_id, producto_id, descripcion_libre, costo_estimado } = req.body ?? {};
   if (!reparacion_id) return res.status(400).json({ error: 'reparacion_id es requerido.' });
   if (!producto_id && !descripcion_libre?.trim()) {
@@ -100,7 +102,7 @@ router.patch('/:id/rechazar', requireRole('admin'), async (req, res) => {
 // real en reparacion_refacciones (sin chequeo de stock, esta pieza se
 // consiguio por fuera) y recalcula el total de la reparacion, igual que
 // POST /reparaciones/:id/refacciones.
-router.post('/:id/recibir', async (req, res) => {
+router.post('/:id/recibir', requireRole('admin', 'tecnico'), async (req, res) => {
   const actual = await pool.query(`SELECT * FROM reparacion_solicitudes_pieza WHERE id = $1`, [req.params.id]);
   const solicitud = actual.rows[0];
   if (!solicitud) return res.status(404).json({ error: 'Solicitud no encontrada.' });
