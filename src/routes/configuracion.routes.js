@@ -26,6 +26,10 @@ router.patch('/', requireRole('admin'), async (req, res) => {
     mostrar_cliente: req.body?.mostrar_cliente,
     mensaje_pie: req.body?.mensaje_pie,
     imprimir_sticker_auto_equipo: req.body?.imprimir_sticker_auto_equipo,
+    imprimir_recibo_auto_reparacion: req.body?.imprimir_recibo_auto_reparacion,
+    reactivacion_catalogo_automatica: req.body?.reactivacion_catalogo_automatica,
+    bloquear_entrega_con_saldo: req.body?.bloquear_entrega_con_saldo,
+    pieza_externa_requiere_catalogo: req.body?.pieza_externa_requiere_catalogo,
   };
   const sets = [];
   const values = [];

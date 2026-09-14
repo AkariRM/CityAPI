@@ -113,7 +113,7 @@ router.get('/export', requireRole('admin', 'vendedor', 'community_manager'), asy
 router.post('/', requireRole('admin', 'vendedor'), async (req, res) => {
   const {
     sku, nombre, categoria_id, tipo, marca, modelo, ram, almacenamiento, procesador, color, usa_imei,
-    precio_venta, costo, precio_mayoreo, precio_revendedor, imagen_url, proveedor_id, sucursal_id, stock_inicial,
+    precio_venta, costo, precio_mayoreo, precio_revendedor, imagen_url, proveedor_id, sucursal_id, stock_inicial, activo,
   } = req.body ?? {};
   if (!nombre?.trim()) return res.status(400).json({ error: 'El nombre es requerido.' });
   if (!['nuevo', 'usado', 'accesorio', 'servicio'].includes(tipo)) {
@@ -128,13 +128,14 @@ router.post('/', requireRole('admin', 'vendedor'), async (req, res) => {
     await client.query('BEGIN');
 
     const producto = await client.query(
-      `INSERT INTO productos (sku, nombre, categoria_id, tipo, marca, modelo, ram, almacenamiento, procesador, color, usa_imei, precio_venta, costo, precio_mayoreo, precio_revendedor, imagen_url, proveedor_id)
-       VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $17)
+      `INSERT INTO productos (sku, nombre, categoria_id, tipo, marca, modelo, ram, almacenamiento, procesador, color, usa_imei, precio_venta, costo, precio_mayoreo, precio_revendedor, imagen_url, proveedor_id, activo)
+       VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $17, $18)
        RETURNING id, sku, nombre, categoria_id, tipo, marca, modelo, ram, almacenamiento, procesador, color, usa_imei, precio_venta, costo, precio_mayoreo, precio_revendedor, imagen_url, proveedor_id, activo`,
       [
         sku || null, nombre.trim(), categoria_id || null, tipo, marca || null, modelo || null,
         ram || null, almacenamiento || null, procesador || null, color || null, usa_imei === false ? false : true,
         precio_venta ?? 0, costo ?? 0, precio_mayoreo ?? null, precio_revendedor ?? null, imagen_url || null, proveedor_id || null,
+        activo === false ? false : true,
       ]
     );
 

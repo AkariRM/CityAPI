@@ -46,6 +46,7 @@ CREATE TYPE estado_reparacion AS ENUM ('recibido', 'diagnostico', 'esperando_aut
 CREATE TYPE prioridad_reparacion AS ENUM ('baja', 'media', 'alta');
 CREATE TYPE etiqueta_foto_reparacion AS ENUM ('antes', 'despues', 'diagnostico');
 CREATE TYPE canal_notificacion_cliente AS ENUM ('whatsapp', 'sms');
+CREATE TYPE estado_solicitud_pieza AS ENUM ('pendiente', 'aprobada', 'rechazada', 'recibida');
 CREATE TYPE estado_notificacion_cliente AS ENUM ('pendiente', 'enviado', 'fallido');
 CREATE TYPE plataforma_publicacion AS ENUM ('instagram', 'facebook');
 CREATE TYPE estado_publicacion AS ENUM ('pendiente', 'programado', 'rechazado', 'publicado');
@@ -480,7 +481,10 @@ CREATE SEQUENCE reparaciones_folio_seq;
 CREATE TABLE reparaciones (
   id                 uuid PRIMARY KEY DEFAULT gen_random_uuid(),
   folio              text NOT NULL UNIQUE DEFAULT ('R-' || lpad(nextval('reparaciones_folio_seq')::text, 6, '0')),
-  cliente_id         uuid NOT NULL REFERENCES clientes(id),
+  -- Nullable: un equipo propio recien comprado que se manda a revision
+  -- (ver origen_reparacion) no tiene cliente -- se liga a producto_id en
+  -- su lugar.
+  cliente_id         uuid REFERENCES clientes(id),
   sucursal_id        uuid NOT NULL REFERENCES sucursales(id),
   equipo_marca       text,
   equipo_modelo      text,
@@ -494,6 +498,10 @@ CREATE TABLE reparaciones (
   costo_mano_obra    numeric(12,2) NOT NULL DEFAULT 0,
   costo_refacciones  numeric(12,2) NOT NULL DEFAULT 0,
   total              numeric(12,2) NOT NULL DEFAULT 0,
+  -- Suma de reparacion_abonos.monto -- denormalizado igual que
+  -- apartados.monto_abonado, para no tener que sumar la tabla de abonos en
+  -- cada lectura.
+  monto_pagado       numeric(12,2) NOT NULL DEFAULT 0,
   garantia_dias      integer NOT NULL DEFAULT 0,
   fecha_estimada_entrega  timestamptz,
   -- Texto que el agente/asesor puede leerle al cliente tal cual (ej. "ya se
@@ -501,12 +509,25 @@ CREATE TABLE reparaciones (
   -- porque ese es lenguaje tecnico interno del tecnico, no algo para el
   -- cliente. Null si no hay nada que decirle todavia.
   nota_para_cliente       text,
+  -- Checklist oficial de revision de equipo (semaforo verde/rojo) que se
+  -- llena al recibir un equipo -- un solo jsonb en vez de 15 columnas para
+  -- poder evolucionar la lista de puntos sin migraciones futuras. Ver
+  -- ChecklistRevisionEquipo.jsx para la forma exacta del objeto.
+  checklist_revision jsonb,
+  -- producto_id/unidad_imei_id solo se usan cuando origen_reparacion es
+  -- 'compra_propia' (equipo del propio inventario mandado a revision antes
+  -- de publicarse en catalogo, ver EquipoFormModal) -- para una reparacion
+  -- normal de cliente quedan null.
+  producto_id        uuid REFERENCES productos(id),
+  unidad_imei_id     uuid REFERENCES unidades_imei(id),
+  origen_reparacion  text NOT NULL DEFAULT 'cliente' CHECK (origen_reparacion IN ('cliente', 'compra_propia')),
   created_at         timestamptz NOT NULL DEFAULT now(),
   updated_at         timestamptz NOT NULL DEFAULT now()
 );
 CREATE INDEX idx_reparaciones_estado ON reparaciones(estado);
 CREATE INDEX idx_reparaciones_tecnico ON reparaciones(tecnico_id);
 CREATE INDEX idx_reparaciones_cliente ON reparaciones(cliente_id);
+CREATE INDEX idx_reparaciones_producto ON reparaciones(producto_id);
 CREATE INDEX idx_reparaciones_sucursal ON reparaciones(sucursal_id);
 
 CREATE TABLE reparacion_refacciones (
@@ -517,6 +538,40 @@ CREATE TABLE reparacion_refacciones (
   costo          numeric(12,2) NOT NULL DEFAULT 0
 );
 CREATE INDEX idx_reparacion_refacciones_reparacion ON reparacion_refacciones(reparacion_id);
+
+-- Cobro/abono de una reparacion -- mismo shape que apartado_abonos.
+CREATE TABLE reparacion_abonos (
+  id             uuid PRIMARY KEY DEFAULT gen_random_uuid(),
+  reparacion_id  uuid NOT NULL REFERENCES reparaciones(id) ON DELETE CASCADE,
+  monto          numeric(12,2) NOT NULL,
+  metodo         metodo_pago NOT NULL,
+  usuario_id     uuid NOT NULL REFERENCES usuarios(id),
+  created_at     timestamptz NOT NULL DEFAULT now()
+);
+CREATE INDEX idx_reparacion_abonos_reparacion ON reparacion_abonos(reparacion_id);
+
+-- Solicitud de una pieza que NO esta en stock (el tecnico la pide, un admin
+-- aprueba el costo/presupuesto) -- paralelo a reparacion_refacciones, que
+-- sigue siendo el camino normal cuando la pieza ya esta en inventario.
+-- reparacion_refaccion_id se llena solo al "recibir" una solicitud aprobada
+-- que SI tiene producto_id (liga con el renglon real que queda en el total).
+CREATE TABLE reparacion_solicitudes_pieza (
+  id                       uuid PRIMARY KEY DEFAULT gen_random_uuid(),
+  reparacion_id            uuid NOT NULL REFERENCES reparaciones(id) ON DELETE CASCADE,
+  producto_id              uuid REFERENCES productos(id),
+  descripcion_libre        text,
+  costo_estimado           numeric(12,2) NOT NULL DEFAULT 0,
+  estado                   estado_solicitud_pieza NOT NULL DEFAULT 'pendiente',
+  solicitado_por           uuid NOT NULL REFERENCES usuarios(id),
+  aprobado_por             uuid REFERENCES usuarios(id),
+  motivo_rechazo           text,
+  reparacion_refaccion_id  uuid REFERENCES reparacion_refacciones(id),
+  created_at               timestamptz NOT NULL DEFAULT now(),
+  updated_at               timestamptz NOT NULL DEFAULT now(),
+  CONSTRAINT chk_solicitud_pieza_identificada CHECK (producto_id IS NOT NULL OR descripcion_libre IS NOT NULL)
+);
+CREATE INDEX idx_solicitudes_pieza_reparacion ON reparacion_solicitudes_pieza(reparacion_id);
+CREATE INDEX idx_solicitudes_pieza_estado ON reparacion_solicitudes_pieza(estado);
 
 -- Linea de tiempo del folio (lo que se ve en el timeline del prototipo).
 CREATE TABLE reparacion_historial (
@@ -731,6 +786,25 @@ CREATE TABLE configuracion_ticket (
   -- calcomania de reparacion (esa siempre se imprime al recibir el equipo,
   -- es un flujo distinto) ni el reimprimir manual desde el boton "Sticker".
   imprimir_sticker_auto_equipo boolean NOT NULL DEFAULT true,
+  -- Igual que arriba pero para el comprobante de recepcion de una
+  -- reparacion (ReciboReparacionModal, variante "recepcion") -- antes solo
+  -- se imprimia a mano ("Imprimir comprobante"), ahora tambien se puede
+  -- auto-imprimir junto con la calcomania al recibir el equipo.
+  imprimir_recibo_auto_reparacion boolean NOT NULL DEFAULT true,
+  -- Al terminar la revision de un equipo propio mandado a taller (ver
+  -- reparaciones.origen_reparacion='compra_propia'): si true, el producto
+  -- se reactiva solo en catalogo al pasar el folio a 'listo'; si false,
+  -- hace falta un boton manual "Publicar en catalogo".
+  reactivacion_catalogo_automatica boolean NOT NULL DEFAULT true,
+  -- Si true, no se puede pasar una reparacion a 'entregado' mientras
+  -- reparaciones.monto_pagado sea menor que el total.
+  bloquear_entrega_con_saldo boolean NOT NULL DEFAULT true,
+  -- Al aprobar una solicitud_pieza sin producto_id (solo descripcion_libre,
+  -- pieza conseguida por fuera): si true, la aprobacion exige vincular un
+  -- producto de catalogo para que el costo se sume solo al total de la
+  -- reparacion; si false, se aprueba tal cual y el costo solo queda
+  -- registrado en la solicitud (el admin lo refleja a mano si quiere).
+  pieza_externa_requiere_catalogo boolean NOT NULL DEFAULT false,
   updated_at                  timestamptz NOT NULL DEFAULT now()
 );
 
@@ -928,6 +1002,8 @@ CREATE TRIGGER trg_apartados_updated_at BEFORE UPDATE ON apartados
 CREATE TRIGGER trg_creditos_updated_at BEFORE UPDATE ON creditos
   FOR EACH ROW EXECUTE FUNCTION set_updated_at();
 CREATE TRIGGER trg_reparaciones_updated_at BEFORE UPDATE ON reparaciones
+  FOR EACH ROW EXECUTE FUNCTION set_updated_at();
+CREATE TRIGGER trg_reparacion_solicitudes_pieza_updated_at BEFORE UPDATE ON reparacion_solicitudes_pieza
   FOR EACH ROW EXECUTE FUNCTION set_updated_at();
 CREATE TRIGGER trg_cambios_equipo_updated_at BEFORE UPDATE ON cambios_equipo
   FOR EACH ROW EXECUTE FUNCTION set_updated_at();

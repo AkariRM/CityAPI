@@ -10,6 +10,7 @@ router.use(requireAuth, requireRole('admin', 'tecnico', 'vendedor'));
 
 const ESTADOS_VALIDOS = ['recibido', 'diagnostico', 'esperando_autorizacion', 'reparacion', 'listo', 'entregado', 'cancelado'];
 const PRIORIDADES_VALIDAS = ['baja', 'media', 'alta'];
+const METODOS_PAGO_VALIDOS = ['efectivo', 'tarjeta'];
 
 // IMPORTANTE: esta ruta especifica va ANTES de "/:id" para que Express no la
 // confunda con una busqueda por id (que fallaria con "reporte" como uuid).
@@ -67,9 +68,11 @@ router.get('/', async (req, res) => {
     `SELECT r.id, r.folio, r.cliente_id, c.nombre AS cliente_nombre, r.sucursal_id,
             r.equipo_marca, r.equipo_modelo, r.imei_equipo, r.problema_reportado, r.diagnostico,
             r.estado, r.prioridad, r.tecnico_id, t.nombre AS tecnico_nombre,
-            r.costo_mano_obra, r.costo_refacciones, r.total, r.garantia_dias, r.created_at, r.updated_at
+            r.costo_mano_obra, r.costo_refacciones, r.total, r.garantia_dias,
+            r.origen_reparacion, r.producto_id, p.nombre AS producto_nombre, r.unidad_imei_id, r.created_at, r.updated_at
      FROM reparaciones r
-     JOIN clientes c ON c.id = r.cliente_id
+     LEFT JOIN clientes c ON c.id = r.cliente_id
+     LEFT JOIN productos p ON p.id = r.producto_id
      LEFT JOIN usuarios t ON t.id = r.tecnico_id
      WHERE ($1::text IS NULL OR r.estado::text = $1)
        AND ($2::uuid IS NULL OR r.tecnico_id = $2::uuid)
@@ -89,12 +92,14 @@ router.get('/:id', async (req, res) => {
             s.nombre AS sucursal_nombre, s.direccion AS sucursal_direccion, s.telefono AS sucursal_telefono,
             r.equipo_marca, r.equipo_modelo, r.imei_equipo, r.equipo_contrasena, r.problema_reportado, r.diagnostico,
             r.estado, r.prioridad, r.tecnico_id, t.nombre AS tecnico_nombre,
-            r.costo_mano_obra, r.costo_refacciones, r.total, r.garantia_dias,
-            r.fecha_estimada_entrega, r.nota_para_cliente, r.created_at, r.updated_at
+            r.costo_mano_obra, r.costo_refacciones, r.total, r.garantia_dias, r.monto_pagado,
+            r.fecha_estimada_entrega, r.nota_para_cliente, r.checklist_revision,
+            r.origen_reparacion, r.producto_id, prod.nombre AS producto_nombre, prod.activo AS producto_activo, r.unidad_imei_id, r.created_at, r.updated_at
      FROM reparaciones r
-     JOIN clientes c ON c.id = r.cliente_id
+     LEFT JOIN clientes c ON c.id = r.cliente_id
      JOIN sucursales s ON s.id = r.sucursal_id
      LEFT JOIN usuarios t ON t.id = r.tecnico_id
+     LEFT JOIN productos prod ON prod.id = r.producto_id
      WHERE r.id = $1`,
     [req.params.id]
   );
@@ -119,6 +124,15 @@ router.get('/:id', async (req, res) => {
     [req.params.id]
   );
 
+  const abonos = await pool.query(
+    `SELECT ab.id, ab.monto, ab.metodo, ab.usuario_id, u.nombre AS usuario_nombre, ab.created_at
+     FROM reparacion_abonos ab
+     LEFT JOIN usuarios u ON u.id = ab.usuario_id
+     WHERE ab.reparacion_id = $1
+     ORDER BY ab.created_at DESC`,
+    [req.params.id]
+  );
+
   // Datos del ticket embebidos aqui (no via GET /configuracion-ticket, que es
   // solo-admin) para que tecnico/vendedor tambien puedan imprimir el
   // comprobante sin necesitar ese permiso — mismo patron que POST /ventas.
@@ -128,6 +142,7 @@ router.get('/:id', async (req, res) => {
     ...reparacion,
     historial: historial.rows,
     refacciones: refacciones.rows,
+    abonos: abonos.rows,
     nombre_negocio: configTicket.nombre_negocio,
     mostrar_direccion: configTicket.mostrar_direccion,
     mostrar_telefono: configTicket.mostrar_telefono,
@@ -138,11 +153,19 @@ router.get('/:id', async (req, res) => {
 });
 
 router.post('/', requireRole('admin', 'vendedor', 'tecnico'), async (req, res) => {
-  const { cliente_id, sucursal_id, telefono, equipo_marca, equipo_modelo, imei_equipo, equipo_contrasena, problema_reportado, prioridad } = req.body ?? {};
+  const {
+    cliente_id, sucursal_id, telefono, equipo_marca, equipo_modelo, imei_equipo, equipo_contrasena, problema_reportado, prioridad,
+    origen_reparacion, producto_id, unidad_imei_id,
+  } = req.body ?? {};
 
-  if (!cliente_id) return res.status(400).json({ error: 'cliente_id es requerido.' });
+  const esCompraPropia = origen_reparacion === 'compra_propia';
   if (!sucursal_id) return res.status(400).json({ error: 'sucursal_id es requerido.' });
-  if (!telefono?.trim()) return res.status(400).json({ error: 'El teléfono de contacto es requerido.' });
+  if (esCompraPropia) {
+    if (!producto_id) return res.status(400).json({ error: 'producto_id es requerido cuando origen_reparacion es "compra_propia".' });
+  } else {
+    if (!cliente_id) return res.status(400).json({ error: 'cliente_id es requerido.' });
+    if (!telefono?.trim()) return res.status(400).json({ error: 'El teléfono de contacto es requerido.' });
+  }
   if (!problema_reportado?.trim()) return res.status(400).json({ error: 'Describe el problema reportado.' });
   const prioridadFinal = PRIORIDADES_VALIDAS.includes(prioridad) ? prioridad : 'media';
 
@@ -150,24 +173,30 @@ router.post('/', requireRole('admin', 'vendedor', 'tecnico'), async (req, res) =
   try {
     await client.query('BEGIN');
 
-    // El telefono capturado aqui se guarda tambien en el cliente (no solo de
-    // paso en la reparacion) — asi queda disponible para futuras visitas,
-    // sin volver clientes.telefono obligatorio a nivel de tabla (otros
-    // modulos, como ventas, lo siguen dejando opcional). Solo escribe si
-    // cambio, para no generar updates de a gratis en el caso comun.
-    await client.query(`UPDATE clientes SET telefono = $1 WHERE id = $2 AND telefono IS DISTINCT FROM $1`, [telefono.trim(), cliente_id]);
+    if (!esCompraPropia) {
+      // El telefono capturado aqui se guarda tambien en el cliente (no solo de
+      // paso en la reparacion) — asi queda disponible para futuras visitas,
+      // sin volver clientes.telefono obligatorio a nivel de tabla (otros
+      // modulos, como ventas, lo siguen dejando opcional). Solo escribe si
+      // cambio, para no generar updates de a gratis en el caso comun.
+      await client.query(`UPDATE clientes SET telefono = $1 WHERE id = $2 AND telefono IS DISTINCT FROM $1`, [telefono.trim(), cliente_id]);
+    }
 
     const reparacion = await client.query(
-      `INSERT INTO reparaciones (cliente_id, sucursal_id, equipo_marca, equipo_modelo, imei_equipo, equipo_contrasena, problema_reportado, prioridad)
-       VALUES ($1, $2, $3, $4, $5, $6, $7, $8)
+      `INSERT INTO reparaciones (cliente_id, sucursal_id, equipo_marca, equipo_modelo, imei_equipo, equipo_contrasena, problema_reportado, prioridad, origen_reparacion, producto_id, unidad_imei_id)
+       VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11)
        RETURNING id, folio, estado, created_at`,
-      [cliente_id, sucursal_id, equipo_marca || null, equipo_modelo || null, imei_equipo || null, equipo_contrasena || null, problema_reportado.trim(), prioridadFinal]
+      [
+        esCompraPropia ? null : cliente_id, sucursal_id, equipo_marca || null, equipo_modelo || null, imei_equipo || null,
+        equipo_contrasena || null, problema_reportado.trim(), prioridadFinal,
+        esCompraPropia ? 'compra_propia' : 'cliente', producto_id || null, unidad_imei_id || null,
+      ]
     );
 
     await client.query(
       `INSERT INTO reparacion_historial (reparacion_id, estado, nota, usuario_id)
-       VALUES ($1, 'recibido', 'Equipo recibido en mostrador.', $2)`,
-      [reparacion.rows[0].id, req.usuario.sub]
+       VALUES ($1, 'recibido', $2, $3)`,
+      [reparacion.rows[0].id, esCompraPropia ? 'Equipo propio ingresado a revisión antes de publicarse en catálogo.' : 'Equipo recibido en mostrador.', req.usuario.sub]
     );
 
     await client.query('COMMIT');
@@ -199,10 +228,20 @@ router.patch('/:id', async (req, res) => {
   if (req.body?.garantia_dias !== undefined && !(Number.isInteger(req.body.garantia_dias) && req.body.garantia_dias >= 0)) {
     return res.status(400).json({ error: 'garantia_dias debe ser un entero mayor o igual a 0.' });
   }
+  if (req.body?.checklist_revision !== undefined && req.body.checklist_revision !== null && typeof req.body.checklist_revision !== 'object') {
+    return res.status(400).json({ error: 'checklist_revision debe ser un objeto.' });
+  }
 
   const nuevoEstado = req.body?.estado ?? actual.estado;
   const costoManoObra = req.body?.costo_mano_obra !== undefined ? Number(req.body.costo_mano_obra) : Number(actual.costo_mano_obra);
   const total = costoManoObra + Number(actual.costo_refacciones);
+  const configTicket = await obtenerConfiguracionTicket();
+
+  if (nuevoEstado === 'entregado' && actual.estado !== 'entregado' && configTicket.bloquear_entrega_con_saldo !== false) {
+    if (Number(actual.monto_pagado) < total) {
+      return res.status(409).json({ error: 'Debes completar el pago antes de marcar la reparación como entregada.' });
+    }
+  }
 
   const fields = {
     diagnostico: req.body?.diagnostico,
@@ -213,6 +252,7 @@ router.patch('/:id', async (req, res) => {
     garantia_dias: req.body?.garantia_dias,
     fecha_estimada_entrega: req.body?.fecha_estimada_entrega,
     nota_para_cliente: req.body?.nota_para_cliente,
+    checklist_revision: req.body?.checklist_revision,
   };
   const sets = [];
   const values = [];
@@ -234,8 +274,8 @@ router.patch('/:id', async (req, res) => {
     const { rows } = await client.query(
       `UPDATE reparaciones SET ${sets.join(', ')} WHERE id = $${i}
        RETURNING id, folio, cliente_id, sucursal_id, equipo_marca, equipo_modelo, imei_equipo, problema_reportado,
-                 diagnostico, estado, prioridad, tecnico_id, costo_mano_obra, costo_refacciones, total, garantia_dias,
-                 fecha_estimada_entrega, nota_para_cliente, created_at, updated_at`,
+                 diagnostico, estado, prioridad, tecnico_id, costo_mano_obra, costo_refacciones, total, monto_pagado, garantia_dias,
+                 fecha_estimada_entrega, nota_para_cliente, checklist_revision, origen_reparacion, producto_id, unidad_imei_id, created_at, updated_at`,
       values
     );
 
@@ -245,6 +285,20 @@ router.patch('/:id', async (req, res) => {
          VALUES ($1, $2, $3, $4)`,
         [req.params.id, nuevoEstado, req.body?.nota || null, req.usuario.sub]
       );
+    }
+
+    // Reactivacion de catalogo: solo aplica a un equipo propio (no de
+    // cliente) que se mando a revision antes de publicarse — al terminar
+    // (estado 'listo'), si el toggle esta encendido, reaparece solo en
+    // catalogo/venta. Si esta apagado, se queda inactivo hasta que alguien
+    // presione "Publicar en catalogo" a mano (ver UnidadesImeiModal/
+    // ReparacionDetalleModal, que reusan PATCH /productos/:id { activo }).
+    if (nuevoEstado === 'listo' && actual.estado !== 'listo' && actual.origen_reparacion === 'compra_propia'
+      && actual.producto_id && configTicket.reactivacion_catalogo_automatica !== false) {
+      await client.query(`UPDATE productos SET activo = true WHERE id = $1`, [actual.producto_id]);
+      if (actual.unidad_imei_id) {
+        await client.query(`UPDATE unidades_imei SET estado = 'disponible', updated_at = now() WHERE id = $1`, [actual.unidad_imei_id]);
+      }
     }
 
     await client.query('COMMIT');
@@ -346,6 +400,48 @@ router.post('/:id/refacciones', requireRole('admin', 'tecnico'), async (req, res
 
     await client.query('COMMIT');
     res.status(201).json(refaccion.rows[0]);
+  } catch (err) {
+    await client.query('ROLLBACK');
+    res.status(err.statusCode ?? 500).json({ error: err.statusCode ? err.message : 'Error interno del servidor.' });
+    if (!err.statusCode) console.error(err);
+  } finally {
+    client.release();
+  }
+});
+
+// Cobro/abono de una reparacion — mismo patron transaccional que
+// POST /apartados/:id/abonos. Excluye tecnico (no maneja dinero, igual que
+// apartados). "Cobrar todo" se resuelve del lado del frontend prellenando
+// monto con el saldo pendiente, no hay un endpoint separado para eso.
+router.post('/:id/abonos', requireRole('admin', 'vendedor'), async (req, res) => {
+  const { monto, metodo } = req.body ?? {};
+  if (!(Number(monto) > 0)) return res.status(400).json({ error: 'monto debe ser mayor a 0.' });
+  if (!METODOS_PAGO_VALIDOS.includes(metodo)) return res.status(400).json({ error: 'Método de pago inválido.' });
+
+  const client = await pool.connect();
+  try {
+    await client.query('BEGIN');
+
+    const reparacionResult = await client.query(`SELECT total, monto_pagado FROM reparaciones WHERE id = $1 FOR UPDATE`, [req.params.id]);
+    const reparacion = reparacionResult.rows[0];
+    if (!reparacion) throw Object.assign(new Error('Reparación no encontrada.'), { statusCode: 404 });
+
+    const saldoPendiente = Number(reparacion.total) - Number(reparacion.monto_pagado);
+    if (Number(monto) > saldoPendiente) {
+      throw Object.assign(new Error('El abono no puede ser mayor al saldo pendiente.'), { statusCode: 400 });
+    }
+
+    const abono = await client.query(
+      `INSERT INTO reparacion_abonos (reparacion_id, monto, metodo, usuario_id) VALUES ($1, $2, $3, $4)
+       RETURNING id, reparacion_id, monto, metodo, usuario_id, created_at`,
+      [req.params.id, Number(monto), metodo, req.usuario.sub]
+    );
+
+    const nuevoMontoPagado = Number(reparacion.monto_pagado) + Number(monto);
+    await client.query(`UPDATE reparaciones SET monto_pagado = $1 WHERE id = $2`, [nuevoMontoPagado, req.params.id]);
+
+    await client.query('COMMIT');
+    res.status(201).json({ ...abono.rows[0], monto_pagado: nuevoMontoPagado, saldo_pendiente: Number(reparacion.total) - nuevoMontoPagado });
   } catch (err) {
     await client.query('ROLLBACK');
     res.status(err.statusCode ?? 500).json({ error: err.statusCode ? err.message : 'Error interno del servidor.' });
