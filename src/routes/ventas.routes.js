@@ -9,6 +9,7 @@ const router = express.Router();
 router.use(requireAuth, requireRole('admin', 'vendedor'));
 
 const METODOS_VALIDOS = ['efectivo', 'tarjeta', 'credito'];
+const TIPOS_PRECIO_VALIDOS = ['publico', 'revendedor', 'mayoreo'];
 
 // Total de ventas de un dia, sin costos ni utilidad — a diferencia de
 // /finanzas/resumen (solo admin), esto lo puede ver tambien el vendedor
@@ -169,16 +170,20 @@ router.post('/', async (req, res) => {
   try {
     await client.query('BEGIN');
 
-    const tipos = {};
-    const nombres = {};
-    const precios = {};
+    // Resultados por LINEA (no por producto_id): dos lineas distintas pueden
+    // compartir el mismo producto_id (ej. dos unidades IMEI del mismo modelo)
+    // y cada una debe poder llevar su propio tipo_precio sin pisar a la otra.
+    const resultados = [];
     for (const item of items) {
-      // El precio se toma siempre del catálogo (con precio especial del
-      // cliente o del rol del vendedor ya resuelto), nunca de lo que mande
+      // El precio se toma siempre del catálogo, nunca de un monto que mande
       // el cliente — de lo contrario cualquiera con el token de un vendedor
-      // podría cobrar lo que quisiera por una venta.
+      // podría cobrar lo que quisiera por una venta. Lo único seleccionable
+      // es a cuál de las 3 listas de precio ya cargadas en el producto
+      // (público con precio especial resuelto / revendedor / mayoreo)
+      // pertenece esta línea — tipo_precio es un valor de una lista fija,
+      // nunca un número.
       const producto = await client.query(
-        `SELECT p.tipo, p.nombre,
+        `SELECT p.tipo, p.nombre, p.precio_mayoreo, p.precio_revendedor,
                 COALESCE(pe_cliente.precio, pe_rol.precio, p.precio_venta) AS precio_venta
          FROM productos p
          LEFT JOIN precios_especiales pe_cliente ON pe_cliente.producto_id = p.id AND pe_cliente.cliente_id = $2::uuid
@@ -187,12 +192,16 @@ router.post('/', async (req, res) => {
         [item.producto_id, cliente_id || null, req.usuario.rol]
       );
       if (!producto.rows[0]) throw Object.assign(new Error('Producto no encontrado.'), { statusCode: 400 });
-      tipos[item.producto_id] = producto.rows[0].tipo;
-      nombres[item.producto_id] = producto.rows[0].nombre;
-      precios[item.producto_id] = Number(producto.rows[0].precio_venta);
+
+      const tipoPrecio = TIPOS_PRECIO_VALIDOS.includes(item.tipo_precio) ? item.tipo_precio : 'publico';
+      let precioResuelto = Number(producto.rows[0].precio_venta);
+      if (tipoPrecio === 'mayoreo' && producto.rows[0].precio_mayoreo != null) precioResuelto = Number(producto.rows[0].precio_mayoreo);
+      else if (tipoPrecio === 'revendedor' && producto.rows[0].precio_revendedor != null) precioResuelto = Number(producto.rows[0].precio_revendedor);
+
+      resultados.push({ tipo: producto.rows[0].tipo, nombre: producto.rows[0].nombre, precio: precioResuelto });
 
       const itemDescuento = Number(item.descuento) || 0;
-      if (itemDescuento > item.cantidad * precios[item.producto_id]) {
+      if (itemDescuento > item.cantidad * precioResuelto) {
         throw Object.assign(new Error(`El descuento de "${producto.rows[0].nombre}" no puede ser mayor a su subtotal.`), { statusCode: 400 });
       }
 
@@ -223,7 +232,7 @@ router.post('/', async (req, res) => {
       }
     }
 
-    const subtotal = items.reduce((sum, i) => sum + i.cantidad * precios[i.producto_id], 0);
+    const subtotal = items.reduce((sum, i, idx) => sum + i.cantidad * resultados[idx].precio, 0);
     const descuentoSolicitado = Number(req.body.descuento) || 0;
     if (descuentoSolicitado < 0 || descuentoSolicitado > subtotal) {
       throw Object.assign(new Error('El descuento debe ser mayor o igual a 0 y no puede superar el subtotal.'), { statusCode: 400 });
@@ -239,8 +248,9 @@ router.post('/', async (req, res) => {
     );
     const venta = ventaResult.rows[0];
 
-    for (const item of items) {
-      const precioUnitario = precios[item.producto_id];
+    for (let idx = 0; idx < items.length; idx++) {
+      const item = items[idx];
+      const precioUnitario = resultados[idx].precio;
       const itemDescuento = Number(item.descuento) || 0;
       const itemSubtotal = item.cantidad * precioUnitario - itemDescuento;
       await client.query(
@@ -253,7 +263,7 @@ router.post('/', async (req, res) => {
         await client.query(`UPDATE unidades_imei SET estado = 'vendido', updated_at = now() WHERE id = $1`, [item.unidad_imei_id]);
       }
 
-      if (tipos[item.producto_id] === 'servicio') continue;
+      if (resultados[idx].tipo === 'servicio') continue;
 
       await client.query(
         `UPDATE inventario SET stock_cantidad = stock_cantidad - $1, updated_at = now()
@@ -309,12 +319,12 @@ router.post('/', async (req, res) => {
       mostrar_vendedor: configTicket.mostrar_vendedor,
       mostrar_cliente: configTicket.mostrar_cliente,
       mensaje_pie: configTicket.mensaje_pie,
-      items: items.map((item) => ({
+      items: items.map((item, idx) => ({
         producto_id: item.producto_id,
-        nombre: nombres[item.producto_id],
+        nombre: resultados[idx].nombre,
         cantidad: item.cantidad,
-        precio_unitario: precios[item.producto_id],
-        subtotal: item.cantidad * precios[item.producto_id] - (Number(item.descuento) || 0),
+        precio_unitario: resultados[idx].precio,
+        subtotal: item.cantidad * resultados[idx].precio - (Number(item.descuento) || 0),
       })),
     });
   } catch (err) {
