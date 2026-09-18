@@ -6,7 +6,7 @@ const router = express.Router();
 
 // Un vendedor puede registrar salidas de caja de su propio turno (gasto o
 // retiro), no solo el admin.
-router.use(requireAuth, requireRole('admin', 'vendedor'));
+router.use(requireAuth, requireRole('admin', 'supervisor', 'vendedor'));
 
 router.get('/', async (req, res) => {
   const { desde, hasta, tipo, sucursal_id } = req.query;

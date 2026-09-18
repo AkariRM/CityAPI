@@ -6,7 +6,7 @@ const { obtenerConfiguracionTicket } = require('../utils/configuracionTicket');
 
 const router = express.Router();
 
-router.use(requireAuth, requireRole('admin', 'tecnico', 'vendedor'));
+router.use(requireAuth, requireRole('admin', 'supervisor', 'tecnico', 'vendedor'));
 
 const ESTADOS_VALIDOS = ['recibido', 'diagnostico', 'esperando_autorizacion', 'reparacion', 'listo', 'entregado', 'cancelado'];
 const PRIORIDADES_VALIDAS = ['baja', 'media', 'alta'];
@@ -17,10 +17,11 @@ const METODOS_PAGO_VALIDOS = ['efectivo', 'tarjeta'];
 router.get('/refacciones/reporte', async (req, res) => {
   const { desde, hasta, sucursal_id } = req.query;
   const { rows } = await pool.query(
-    `SELECT rr.id, r.folio, rr.producto_id, p.nombre AS producto_nombre, rr.cantidad, rr.costo, r.created_at AS fecha
+    `SELECT rr.id, r.folio, rr.producto_id, rr.refaccion_id, COALESCE(p.nombre, ref.nombre) AS producto_nombre, rr.cantidad, rr.costo, r.created_at AS fecha
      FROM reparacion_refacciones rr
      JOIN reparaciones r ON r.id = rr.reparacion_id
-     JOIN productos p ON p.id = rr.producto_id
+     LEFT JOIN productos p ON p.id = rr.producto_id
+     LEFT JOIN refacciones ref ON ref.id = rr.refaccion_id
      WHERE ($1::timestamptz IS NULL OR r.created_at >= $1::timestamptz)
        AND ($2::timestamptz IS NULL OR r.created_at < $2::timestamptz)
        AND ($3::uuid IS NULL OR r.sucursal_id = $3::uuid)
@@ -116,11 +117,12 @@ router.get('/:id', async (req, res) => {
   );
 
   const refacciones = await pool.query(
-    `SELECT rr.id, rr.producto_id, p.nombre AS producto_nombre, rr.cantidad, rr.costo
+    `SELECT rr.id, rr.producto_id, rr.refaccion_id, COALESCE(p.nombre, ref.nombre) AS producto_nombre, rr.cantidad, rr.costo
      FROM reparacion_refacciones rr
-     JOIN productos p ON p.id = rr.producto_id
+     LEFT JOIN productos p ON p.id = rr.producto_id
+     LEFT JOIN refacciones ref ON ref.id = rr.refaccion_id
      WHERE rr.reparacion_id = $1
-     ORDER BY p.nombre`,
+     ORDER BY producto_nombre`,
     [req.params.id]
   );
 
@@ -152,7 +154,7 @@ router.get('/:id', async (req, res) => {
   });
 });
 
-router.post('/', requireRole('admin', 'vendedor', 'tecnico'), async (req, res) => {
+router.post('/', requireRole('admin', 'supervisor', 'vendedor', 'tecnico'), async (req, res) => {
   const {
     cliente_id, sucursal_id, telefono, equipo_marca, equipo_modelo, imei_equipo, equipo_contrasena, problema_reportado, prioridad,
     origen_reparacion, producto_id, unidad_imei_id,
@@ -312,7 +314,7 @@ router.patch('/:id', async (req, res) => {
   }
 });
 
-const CANALES_VALIDOS = ['whatsapp', 'sms'];
+const CANALES_VALIDOS = ['whatsapp'];
 
 // No hay integracion real de WhatsApp/SMS (requeriria WhatsApp Business API
 // o un gateway de SMS con credenciales que no tenemos) — esto es una
@@ -347,9 +349,9 @@ router.post('/:id/notificaciones', async (req, res) => {
   res.status(201).json(rows[0]);
 });
 
-router.post('/:id/refacciones', requireRole('admin', 'tecnico'), async (req, res) => {
-  const { producto_id, cantidad, costo } = req.body ?? {};
-  if (!producto_id) return res.status(400).json({ error: 'producto_id es requerido.' });
+router.post('/:id/refacciones', requireRole('admin', 'supervisor', 'tecnico'), async (req, res) => {
+  const { producto_id, refaccion_id, cantidad, costo } = req.body ?? {};
+  if (!producto_id && !refaccion_id) return res.status(400).json({ error: 'producto_id o refaccion_id es requerido.' });
   const cant = Number(cantidad) || 1;
 
   const reparacionResult = await pool.query(`SELECT sucursal_id FROM reparaciones WHERE id = $1`, [req.params.id]);
@@ -360,33 +362,46 @@ router.post('/:id/refacciones', requireRole('admin', 'tecnico'), async (req, res
   try {
     await client.query('BEGIN');
 
-    const stockResult = await client.query(
-      `SELECT stock_cantidad, p.nombre, p.precio_venta
-       FROM inventario i JOIN productos p ON p.id = i.producto_id
-       WHERE i.producto_id = $1 AND i.sucursal_id = $2 FOR UPDATE`,
-      [producto_id, reparacion.sucursal_id]
-    );
-    const stockRow = stockResult.rows[0];
-    if (!stockRow || stockRow.stock_cantidad < cant) {
-      throw Object.assign(new Error(`Stock insuficiente para "${stockRow?.nombre ?? producto_id}".`), { statusCode: 409 });
+    let costoFinal;
+    if (refaccion_id) {
+      // Inventario dedicado de refacciones -- no pasa por inventario/
+      // movimientos_inventario, esas tablas son solo de productos.
+      const stockResult = await client.query(`SELECT stock, nombre, costo FROM refacciones WHERE id = $1 FOR UPDATE`, [refaccion_id]);
+      const stockRow = stockResult.rows[0];
+      if (!stockRow || stockRow.stock < cant) {
+        throw Object.assign(new Error(`Stock insuficiente para "${stockRow?.nombre ?? refaccion_id}".`), { statusCode: 409 });
+      }
+      costoFinal = costo !== undefined ? Number(costo) : cant * Number(stockRow.costo);
+      await client.query(`UPDATE refacciones SET stock = stock - $1 WHERE id = $2`, [cant, refaccion_id]);
+    } else {
+      const stockResult = await client.query(
+        `SELECT stock_cantidad, p.nombre, p.precio_venta
+         FROM inventario i JOIN productos p ON p.id = i.producto_id
+         WHERE i.producto_id = $1 AND i.sucursal_id = $2 FOR UPDATE`,
+        [producto_id, reparacion.sucursal_id]
+      );
+      const stockRow = stockResult.rows[0];
+      if (!stockRow || stockRow.stock_cantidad < cant) {
+        throw Object.assign(new Error(`Stock insuficiente para "${stockRow?.nombre ?? producto_id}".`), { statusCode: 409 });
+      }
+      costoFinal = costo !== undefined ? Number(costo) : cant * Number(stockRow.precio_venta);
+
+      await client.query(
+        `UPDATE inventario SET stock_cantidad = stock_cantidad - $1, updated_at = now() WHERE producto_id = $2 AND sucursal_id = $3`,
+        [cant, producto_id, reparacion.sucursal_id]
+      );
+      await client.query(
+        `INSERT INTO movimientos_inventario (producto_id, sucursal_id, tipo, cantidad, motivo, referencia_tipo, referencia_id, usuario_id)
+         VALUES ($1, $2, 'salida', $3, 'Refacción usada en reparación', 'reparacion', $4, $5)`,
+        [producto_id, reparacion.sucursal_id, cant, req.params.id, req.usuario.sub]
+      );
     }
-    const costoFinal = costo !== undefined ? Number(costo) : cant * Number(stockRow.precio_venta);
 
     const refaccion = await client.query(
-      `INSERT INTO reparacion_refacciones (reparacion_id, producto_id, cantidad, costo)
-       VALUES ($1, $2, $3, $4)
-       RETURNING id, producto_id, cantidad, costo`,
-      [req.params.id, producto_id, cant, costoFinal]
-    );
-
-    await client.query(
-      `UPDATE inventario SET stock_cantidad = stock_cantidad - $1, updated_at = now() WHERE producto_id = $2 AND sucursal_id = $3`,
-      [cant, producto_id, reparacion.sucursal_id]
-    );
-    await client.query(
-      `INSERT INTO movimientos_inventario (producto_id, sucursal_id, tipo, cantidad, motivo, referencia_tipo, referencia_id, usuario_id)
-       VALUES ($1, $2, 'salida', $3, 'Refacción usada en reparación', 'reparacion', $4, $5)`,
-      [producto_id, reparacion.sucursal_id, cant, req.params.id, req.usuario.sub]
+      `INSERT INTO reparacion_refacciones (reparacion_id, producto_id, refaccion_id, cantidad, costo)
+       VALUES ($1, $2, $3, $4, $5)
+       RETURNING id, producto_id, refaccion_id, cantidad, costo`,
+      [req.params.id, producto_id || null, refaccion_id || null, cant, costoFinal]
     );
 
     const sumaResult = await client.query(
@@ -413,7 +428,7 @@ router.post('/:id/refacciones', requireRole('admin', 'tecnico'), async (req, res
 // POST /apartados/:id/abonos. Excluye tecnico (no maneja dinero, igual que
 // apartados). "Cobrar todo" se resuelve del lado del frontend prellenando
 // monto con el saldo pendiente, no hay un endpoint separado para eso.
-router.post('/:id/abonos', requireRole('admin', 'vendedor'), async (req, res) => {
+router.post('/:id/abonos', requireRole('admin', 'supervisor', 'vendedor'), async (req, res) => {
   const { monto, metodo } = req.body ?? {};
   if (!(Number(monto) > 0)) return res.status(400).json({ error: 'monto debe ser mayor a 0.' });
   if (!METODOS_PAGO_VALIDOS.includes(metodo)) return res.status(400).json({ error: 'Método de pago inválido.' });

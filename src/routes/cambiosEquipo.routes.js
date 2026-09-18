@@ -3,7 +3,7 @@ const { pool } = require('../db');
 const { requireAuth, requireRole, esAdminODueno } = require('../middleware/auth');
 
 const router = express.Router();
-router.use(requireAuth, requireRole('admin', 'vendedor'));
+router.use(requireAuth, requireRole('admin', 'supervisor', 'vendedor'));
 
 const GRADOS_VALIDOS = ['A', 'B', 'C', 'D', 'otro'];
 

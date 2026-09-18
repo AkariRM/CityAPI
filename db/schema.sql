@@ -34,7 +34,12 @@ $$ LANGUAGE plpgsql;
 -- diferencia de 'admin', que queda asignado a una sola vía usuarios.empresa_id).
 -- 'pto' (Punto de Venta/Operador) es exclusivo de Áurea — vendedor+técnico
 -- de CityPhone no aplican ahí, es un rol operativo mucho más simple.
-CREATE TYPE rol_usuario AS ENUM ('dueño', 'admin', 'vendedor', 'tecnico', 'community_manager', 'pto');
+-- 'supervisor' es equivalente a 'admin' dentro de Ventas/Accesorios/
+-- Reparaciones/Piezas/Gastos (incluye lo que hoy pueden vendedor+técnico
+-- juntos, más las acciones "solo admin" de esos mismos módulos) pero NO
+-- entra a Marketing, Finanzas, Administración/Usuarios/Configuración ni
+-- Agente Web — ver requireRole(...) en cada archivo de rutas.
+CREATE TYPE rol_usuario AS ENUM ('dueño', 'admin', 'vendedor', 'tecnico', 'community_manager', 'pto', 'supervisor');
 CREATE TYPE metodo_pago AS ENUM ('efectivo', 'tarjeta', 'credito');
 CREATE TYPE estado_venta AS ENUM ('completada', 'cancelada');
 CREATE TYPE tipo_producto AS ENUM ('nuevo', 'usado', 'accesorio', 'servicio');
@@ -530,12 +535,36 @@ CREATE INDEX idx_reparaciones_cliente ON reparaciones(cliente_id);
 CREATE INDEX idx_reparaciones_producto ON reparaciones(producto_id);
 CREATE INDEX idx_reparaciones_sucursal ON reparaciones(sucursal_id);
 
+-- Inventario de refacciones, separado del catalogo de productos/accesorios
+-- (pedido explicito del negocio: su propia pantalla, su propia tabla). Sin
+-- folio ni IMEI ni galeria -- es un almacen de piezas, no un catalogo de
+-- venta. sucursal_id NOT NULL porque una pieza fisica siempre vive en un
+-- local especifico (igual que unidades_imei).
+CREATE TABLE refacciones (
+  id            uuid PRIMARY KEY DEFAULT gen_random_uuid(),
+  sucursal_id   uuid NOT NULL REFERENCES sucursales(id),
+  nombre        text NOT NULL,
+  categoria     text,
+  proveedor     text,
+  costo         numeric(12,2) NOT NULL DEFAULT 0,
+  stock         integer NOT NULL DEFAULT 0 CHECK (stock >= 0),
+  stock_minimo  integer NOT NULL DEFAULT 0,
+  activo        boolean NOT NULL DEFAULT true,
+  created_at    timestamptz NOT NULL DEFAULT now(),
+  updated_at    timestamptz NOT NULL DEFAULT now()
+);
+CREATE INDEX idx_refacciones_sucursal ON refacciones(sucursal_id);
+
+-- producto_id (accesorio de catalogo) o refaccion_id (inventario dedicado)
+-- -- exactamente uno de los dos, nunca ambos ni ninguno.
 CREATE TABLE reparacion_refacciones (
   id             uuid PRIMARY KEY DEFAULT gen_random_uuid(),
   reparacion_id  uuid NOT NULL REFERENCES reparaciones(id) ON DELETE CASCADE,
-  producto_id    uuid NOT NULL REFERENCES productos(id),
+  producto_id    uuid REFERENCES productos(id),
+  refaccion_id   uuid REFERENCES refacciones(id),
   cantidad       integer NOT NULL DEFAULT 1 CHECK (cantidad > 0),
-  costo          numeric(12,2) NOT NULL DEFAULT 0
+  costo          numeric(12,2) NOT NULL DEFAULT 0,
+  CONSTRAINT chk_reparacion_refaccion_identificada CHECK ((producto_id IS NOT NULL) <> (refaccion_id IS NOT NULL))
 );
 CREATE INDEX idx_reparacion_refacciones_reparacion ON reparacion_refacciones(reparacion_id);
 
@@ -559,6 +588,7 @@ CREATE TABLE reparacion_solicitudes_pieza (
   id                       uuid PRIMARY KEY DEFAULT gen_random_uuid(),
   reparacion_id            uuid NOT NULL REFERENCES reparaciones(id) ON DELETE CASCADE,
   producto_id              uuid REFERENCES productos(id),
+  refaccion_id             uuid REFERENCES refacciones(id),
   descripcion_libre        text,
   costo_estimado           numeric(12,2) NOT NULL DEFAULT 0,
   estado                   estado_solicitud_pieza NOT NULL DEFAULT 'pendiente',
@@ -568,7 +598,7 @@ CREATE TABLE reparacion_solicitudes_pieza (
   reparacion_refaccion_id  uuid REFERENCES reparacion_refacciones(id),
   created_at               timestamptz NOT NULL DEFAULT now(),
   updated_at               timestamptz NOT NULL DEFAULT now(),
-  CONSTRAINT chk_solicitud_pieza_identificada CHECK (producto_id IS NOT NULL OR descripcion_libre IS NOT NULL)
+  CONSTRAINT chk_solicitud_pieza_identificada CHECK (producto_id IS NOT NULL OR refaccion_id IS NOT NULL OR descripcion_libre IS NOT NULL)
 );
 CREATE INDEX idx_solicitudes_pieza_reparacion ON reparacion_solicitudes_pieza(reparacion_id);
 CREATE INDEX idx_solicitudes_pieza_estado ON reparacion_solicitudes_pieza(estado);
@@ -1004,6 +1034,8 @@ CREATE TRIGGER trg_creditos_updated_at BEFORE UPDATE ON creditos
 CREATE TRIGGER trg_reparaciones_updated_at BEFORE UPDATE ON reparaciones
   FOR EACH ROW EXECUTE FUNCTION set_updated_at();
 CREATE TRIGGER trg_reparacion_solicitudes_pieza_updated_at BEFORE UPDATE ON reparacion_solicitudes_pieza
+  FOR EACH ROW EXECUTE FUNCTION set_updated_at();
+CREATE TRIGGER trg_refacciones_updated_at BEFORE UPDATE ON refacciones
   FOR EACH ROW EXECUTE FUNCTION set_updated_at();
 CREATE TRIGGER trg_cambios_equipo_updated_at BEFORE UPDATE ON cambios_equipo
   FOR EACH ROW EXECUTE FUNCTION set_updated_at();

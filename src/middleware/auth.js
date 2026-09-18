@@ -63,9 +63,11 @@ function requireEmpresa(slug) {
 // Mismo criterio de jerarquia que requireRole()'s puedeComoDueno, pero para
 // los chequeos de rol escritos a mano dentro del cuerpo de una ruta (ej.
 // "solo el admin puede omitir sucursal_id") que no pasan por requireRole y
-// por eso no heredan ese passthrough automaticamente.
+// por eso no heredan ese passthrough automaticamente. 'supervisor' entra
+// aqui tambien -- ve "todas" las sucursales igual que admin, dentro de los
+// modulos a los que ya tiene acceso.
 function esAdminODueno(rol) {
-  return rol === 'admin' || rol === 'dueño';
+  return rol === 'admin' || rol === 'dueño' || rol === 'supervisor';
 }
 
 module.exports = { requireAuth, requireRole, requireEmpresa, esAdminODueno };

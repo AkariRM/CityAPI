@@ -11,7 +11,7 @@ router.use(requireAuth);
 // folio de reparacion, y el community manager para el catalogo de solo
 // lectura y para vincular equipos en Marketplace; las demas rutas (alta,
 // edicion, stock, IMEI) siguen restringidas a quienes administran el catalogo.
-router.get('/', requireRole('admin', 'vendedor', 'tecnico', 'community_manager'), async (req, res) => {
+router.get('/', requireRole('admin', 'supervisor', 'vendedor', 'tecnico', 'community_manager'), async (req, res) => {
   const { sucursal_id, q, categoria_id, tipo, cliente_id, activo } = req.query;
   // Admin y dueño pueden omitir sucursal_id (ven "Todas las sucursales" con
   // el stock sumado); los demas roles lo siguen necesitando, igual que siempre.
@@ -58,7 +58,7 @@ router.get('/', requireRole('admin', 'vendedor', 'tecnico', 'community_manager')
 // Bitacora de entradas/salidas/ajustes de todos los productos de una
 // sucursal. Va antes de "/:id" para que Express no lo confunda con una
 // busqueda por id.
-router.get('/movimientos', requireRole('admin', 'vendedor'), async (req, res) => {
+router.get('/movimientos', requireRole('admin', 'supervisor', 'vendedor'), async (req, res) => {
   const { sucursal_id, producto_id, desde, hasta } = req.query;
   // Admin y dueño pueden omitir sucursal_id (ven el historial combinado de
   // todas las sucursales); vendedor lo sigue necesitando, igual que siempre.
@@ -86,7 +86,7 @@ router.get('/movimientos', requireRole('admin', 'vendedor'), async (req, res) =>
 // reales — deliberadamente excluye costo/precio_mayoreo/precio_revendedor/
 // proveedor/stock, que son datos internos del negocio, no algo para salir
 // de la empresa.
-router.get('/export', requireRole('admin', 'vendedor', 'community_manager'), async (req, res) => {
+router.get('/export', requireRole('admin', 'supervisor', 'vendedor', 'community_manager'), async (req, res) => {
   const { rows } = await pool.query(
     `SELECT p.sku, p.nombre, p.tipo, c.nombre AS categoria, p.marca, p.modelo, p.precio_venta, p.imagen_url
      FROM productos p
@@ -110,7 +110,7 @@ router.get('/export', requireRole('admin', 'vendedor', 'community_manager'), asy
   res.send(csv);
 });
 
-router.post('/', requireRole('admin', 'vendedor'), async (req, res) => {
+router.post('/', requireRole('admin', 'supervisor', 'vendedor'), async (req, res) => {
   const {
     sku, nombre, categoria_id, tipo, marca, modelo, ram, almacenamiento, procesador, color, usa_imei,
     precio_venta, costo, precio_mayoreo, precio_revendedor, imagen_url, proveedor_id, sucursal_id, stock_inicial, activo,
@@ -164,7 +164,7 @@ router.post('/', requireRole('admin', 'vendedor'), async (req, res) => {
   }
 });
 
-router.patch('/:id', requireRole('admin', 'vendedor'), async (req, res) => {
+router.patch('/:id', requireRole('admin', 'supervisor', 'vendedor'), async (req, res) => {
   if (req.body?.tipo !== undefined && !['nuevo', 'usado', 'accesorio', 'servicio'].includes(req.body.tipo)) {
     return res.status(400).json({ error: 'Tipo inválido.' });
   }
@@ -208,7 +208,7 @@ router.patch('/:id', requireRole('admin', 'vendedor'), async (req, res) => {
   res.json(rows[0]);
 });
 
-router.patch('/:id/stock-minimo', requireRole('admin', 'vendedor'), async (req, res) => {
+router.patch('/:id/stock-minimo', requireRole('admin', 'supervisor', 'vendedor'), async (req, res) => {
   const { sucursal_id, stock_minimo } = req.body ?? {};
   if (!sucursal_id) return res.status(400).json({ error: 'sucursal_id es requerido.' });
   if (!(Number.isInteger(stock_minimo) && stock_minimo >= 0)) {
@@ -225,7 +225,7 @@ router.patch('/:id/stock-minimo', requireRole('admin', 'vendedor'), async (req, 
   res.json(rows[0]);
 });
 
-router.post('/:id/ajuste-stock', requireRole('admin', 'vendedor'), async (req, res) => {
+router.post('/:id/ajuste-stock', requireRole('admin', 'supervisor', 'vendedor'), async (req, res) => {
   const { sucursal_id, cantidad, motivo, tipo } = req.body ?? {};
   if (!sucursal_id) return res.status(400).json({ error: 'sucursal_id es requerido.' });
   const delta = Number(cantidad);
@@ -273,7 +273,7 @@ router.post('/:id/ajuste-stock', requireRole('admin', 'vendedor'), async (req, r
   }
 });
 
-router.get('/:id/unidades', requireRole('admin', 'vendedor'), async (req, res) => {
+router.get('/:id/unidades', requireRole('admin', 'supervisor', 'vendedor'), async (req, res) => {
   const { sucursal_id } = req.query;
   const { rows } = await pool.query(
     `SELECT id, imei, condicion, costo_adquisicion, estado, created_at
@@ -285,7 +285,7 @@ router.get('/:id/unidades', requireRole('admin', 'vendedor'), async (req, res) =
   res.json(rows);
 });
 
-router.post('/:id/unidades', requireRole('admin', 'vendedor'), async (req, res) => {
+router.post('/:id/unidades', requireRole('admin', 'supervisor', 'vendedor'), async (req, res) => {
   const { sucursal_id, imei, condicion, costo_adquisicion } = req.body ?? {};
   if (!sucursal_id) return res.status(400).json({ error: 'sucursal_id es requerido.' });
 
@@ -328,7 +328,7 @@ router.post('/:id/unidades', requireRole('admin', 'vendedor'), async (req, res) 
   }
 });
 
-router.delete('/:id/unidades/:unidadId', requireRole('admin', 'vendedor'), async (req, res) => {
+router.delete('/:id/unidades/:unidadId', requireRole('admin', 'supervisor', 'vendedor'), async (req, res) => {
   const client = await pool.connect();
   try {
     await client.query('BEGIN');
@@ -375,7 +375,7 @@ router.delete('/:id/unidades/:unidadId', requireRole('admin', 'vendedor'), async
 
 const MAX_IMAGENES_PRODUCTO = 10;
 
-router.get('/:id/imagenes', requireRole('admin', 'vendedor', 'tecnico', 'community_manager'), async (req, res) => {
+router.get('/:id/imagenes', requireRole('admin', 'supervisor', 'vendedor', 'tecnico', 'community_manager'), async (req, res) => {
   const { rows } = await pool.query(
     `SELECT id, imagen_url, es_principal, orden, created_at
      FROM producto_imagenes WHERE producto_id = $1 ORDER BY orden ASC, created_at ASC`,
@@ -388,7 +388,7 @@ router.get('/:id/imagenes', requireRole('admin', 'vendedor', 'tecnico', 'communi
 // automaticamente — el cliente no elige eso aqui, es un PATCH aparte
 // (.../principal) para cambiarla despues. "orden" es simplemente el conteo
 // actual, asi que cada imagen nueva se agrega al final.
-router.post('/:id/imagenes', requireRole('admin', 'vendedor'), async (req, res) => {
+router.post('/:id/imagenes', requireRole('admin', 'supervisor', 'vendedor'), async (req, res) => {
   const { imagen_url } = req.body ?? {};
   if (!imagen_url) return res.status(400).json({ error: 'imagen_url es requerida.' });
 
@@ -428,7 +428,7 @@ router.post('/:id/imagenes', requireRole('admin', 'vendedor'), async (req, res) 
   }
 });
 
-router.patch('/:id/imagenes/:imagenId/principal', requireRole('admin', 'vendedor'), async (req, res) => {
+router.patch('/:id/imagenes/:imagenId/principal', requireRole('admin', 'supervisor', 'vendedor'), async (req, res) => {
   const client = await pool.connect();
   try {
     await client.query('BEGIN');
@@ -457,7 +457,7 @@ router.patch('/:id/imagenes/:imagenId/principal', requireRole('admin', 'vendedor
 // Si la imagen borrada era la principal, la siguiente por orden la
 // sustituye automaticamente — un producto con al menos una imagen siempre
 // tiene exactamente una principal. Si era la unica, imagen_url queda null.
-router.delete('/:id/imagenes/:imagenId', requireRole('admin', 'vendedor'), async (req, res) => {
+router.delete('/:id/imagenes/:imagenId', requireRole('admin', 'supervisor', 'vendedor'), async (req, res) => {
   const client = await pool.connect();
   try {
     await client.query('BEGIN');
@@ -497,7 +497,7 @@ router.delete('/:id/imagenes/:imagenId', requireRole('admin', 'vendedor'), async
 // item vive en su propia transaccion — a la escala de un historial de
 // compras real (cientos/miles de filas) no tiene sentido que una sola fila
 // con problema (ej. IMEI duplicado) tumbe a todas las demas del lote.
-router.post('/importar-lote', requireRole('admin', 'vendedor'), async (req, res) => {
+router.post('/importar-lote', requireRole('admin', 'supervisor', 'vendedor'), async (req, res) => {
   const { sucursal_id, tipo, items } = req.body ?? {};
   if (!sucursal_id) return res.status(400).json({ error: 'sucursal_id es requerido.' });
   if (!['nuevo', 'usado'].includes(tipo)) return res.status(400).json({ error: 'tipo debe ser "nuevo" o "usado".' });

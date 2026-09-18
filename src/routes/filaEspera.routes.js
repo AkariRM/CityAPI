@@ -4,7 +4,7 @@ const { requireAuth, requireRole, esAdminODueno } = require('../middleware/auth'
 const { inicioDiaUTC, finDiaUTCExclusivo, hoyLocal } = require('../utils/fechas');
 
 const router = express.Router();
-router.use(requireAuth, requireRole('admin', 'vendedor'));
+router.use(requireAuth, requireRole('admin', 'supervisor', 'vendedor'));
 
 router.get('/', async (req, res) => {
   const { sucursal_id } = req.query;

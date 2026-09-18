@@ -4,7 +4,7 @@ const { requireAuth, requireRole } = require('../middleware/auth');
 
 const router = express.Router();
 
-router.use(requireAuth, requireRole('admin', 'vendedor'));
+router.use(requireAuth, requireRole('admin', 'supervisor', 'vendedor'));
 
 router.post('/', async (req, res) => {
   const { venta_original_id, producto_devuelto_id, producto_nuevo_id, unidad_imei_nueva_id, motivo } = req.body ?? {};
