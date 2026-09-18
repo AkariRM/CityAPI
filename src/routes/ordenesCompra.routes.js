@@ -3,7 +3,7 @@ const { pool } = require('../db');
 const { requireAuth, requireRole, esAdminODueno } = require('../middleware/auth');
 
 const router = express.Router();
-router.use(requireAuth, requireRole('admin', 'supervisor', 'vendedor'));
+router.use(requireAuth, requireRole('admin', 'vendedor'));
 
 router.get('/', async (req, res) => {
   const { sucursal_id, proveedor_id, estado } = req.query;

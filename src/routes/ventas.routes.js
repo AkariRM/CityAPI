@@ -6,7 +6,7 @@ const { inicioDiaUTC, finDiaUTCExclusivo, hoyLocal } = require('../utils/fechas'
 
 const router = express.Router();
 
-router.use(requireAuth, requireRole('admin', 'supervisor', 'vendedor'));
+router.use(requireAuth, requireRole('admin', 'vendedor'));
 
 const METODOS_VALIDOS = ['efectivo', 'tarjeta', 'credito'];
 const TIPOS_PRECIO_VALIDOS = ['publico', 'revendedor', 'mayoreo'];

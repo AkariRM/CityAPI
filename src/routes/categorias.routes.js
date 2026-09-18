@@ -4,7 +4,7 @@ const { requireAuth, requireRole } = require('../middleware/auth');
 
 const router = express.Router();
 
-router.use(requireAuth, requireRole('admin', 'supervisor', 'vendedor'));
+router.use(requireAuth, requireRole('admin', 'vendedor'));
 
 router.get('/', async (req, res) => {
   const { rows } = await pool.query(`SELECT id, nombre FROM categorias ORDER BY nombre`);

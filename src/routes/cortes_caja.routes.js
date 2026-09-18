@@ -5,7 +5,7 @@ const { inicioDiaUTC, finDiaUTCExclusivo } = require('../utils/fechas');
 
 const router = express.Router();
 
-router.use(requireAuth, requireRole('admin', 'supervisor', 'vendedor'));
+router.use(requireAuth, requireRole('admin', 'vendedor'));
 
 async function calcularResumen(sucursal_id, usuario_id) {
   const ultimoCorte = await pool.query(

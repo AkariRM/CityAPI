@@ -3,7 +3,7 @@ const { pool } = require('../db');
 const { requireAuth, requireRole } = require('../middleware/auth');
 
 const router = express.Router();
-router.use(requireAuth, requireRole('admin', 'supervisor', 'vendedor'));
+router.use(requireAuth, requireRole('admin', 'vendedor'));
 
 const METODOS_ABONO_VALIDOS = ['efectivo', 'tarjeta'];
 const ESTADOS_VALIDOS = ['activo', 'pagado', 'vencido', 'cancelado'];
@@ -57,7 +57,7 @@ router.get('/:id', async (req, res) => {
 // cuenta/tab para un cliente). El flujo mas comun es vender "a credito"
 // desde el Punto de Venta (ver POST /ventas), que crea este mismo tipo de
 // registro automaticamente con venta_id.
-router.post('/', requireRole('admin', 'supervisor'), async (req, res) => {
+router.post('/', requireRole('admin'), async (req, res) => {
   const { cliente_id, monto_total, limite_aprobado, condiciones } = req.body ?? {};
   if (!cliente_id) return res.status(400).json({ error: 'cliente_id es requerido.' });
   if (!(Number(monto_total) > 0)) return res.status(400).json({ error: 'monto_total debe ser mayor a 0.' });
@@ -74,7 +74,7 @@ router.post('/', requireRole('admin', 'supervisor'), async (req, res) => {
   res.status(201).json(rows[0]);
 });
 
-router.patch('/:id', requireRole('admin', 'supervisor'), async (req, res) => {
+router.patch('/:id', requireRole('admin'), async (req, res) => {
   const { estado, condiciones, limite_aprobado } = req.body ?? {};
   if (estado !== undefined && !ESTADOS_VALIDOS.includes(estado)) return res.status(400).json({ error: 'Estado inválido.' });
 

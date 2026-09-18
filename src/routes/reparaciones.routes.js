@@ -6,7 +6,7 @@ const { obtenerConfiguracionTicket } = require('../utils/configuracionTicket');
 
 const router = express.Router();
 
-router.use(requireAuth, requireRole('admin', 'supervisor', 'tecnico', 'vendedor'));
+router.use(requireAuth, requireRole('admin', 'tecnico', 'vendedor'));
 
 const ESTADOS_VALIDOS = ['recibido', 'diagnostico', 'esperando_autorizacion', 'reparacion', 'listo', 'entregado', 'cancelado'];
 const PRIORIDADES_VALIDAS = ['baja', 'media', 'alta'];
@@ -154,7 +154,7 @@ router.get('/:id', async (req, res) => {
   });
 });
 
-router.post('/', requireRole('admin', 'supervisor', 'vendedor', 'tecnico'), async (req, res) => {
+router.post('/', requireRole('admin', 'vendedor', 'tecnico'), async (req, res) => {
   const {
     cliente_id, sucursal_id, telefono, equipo_marca, equipo_modelo, imei_equipo, equipo_contrasena, problema_reportado, prioridad,
     origen_reparacion, producto_id, unidad_imei_id,
@@ -349,7 +349,7 @@ router.post('/:id/notificaciones', async (req, res) => {
   res.status(201).json(rows[0]);
 });
 
-router.post('/:id/refacciones', requireRole('admin', 'supervisor', 'tecnico'), async (req, res) => {
+router.post('/:id/refacciones', requireRole('admin', 'tecnico'), async (req, res) => {
   const { producto_id, refaccion_id, cantidad, costo } = req.body ?? {};
   if (!producto_id && !refaccion_id) return res.status(400).json({ error: 'producto_id o refaccion_id es requerido.' });
   const cant = Number(cantidad) || 1;
@@ -428,7 +428,7 @@ router.post('/:id/refacciones', requireRole('admin', 'supervisor', 'tecnico'), a
 // POST /apartados/:id/abonos. Excluye tecnico (no maneja dinero, igual que
 // apartados). "Cobrar todo" se resuelve del lado del frontend prellenando
 // monto con el saldo pendiente, no hay un endpoint separado para eso.
-router.post('/:id/abonos', requireRole('admin', 'supervisor', 'vendedor'), async (req, res) => {
+router.post('/:id/abonos', requireRole('admin', 'vendedor'), async (req, res) => {
   const { monto, metodo } = req.body ?? {};
   if (!(Number(monto) > 0)) return res.status(400).json({ error: 'monto debe ser mayor a 0.' });
   if (!METODOS_PAGO_VALIDOS.includes(metodo)) return res.status(400).json({ error: 'Método de pago inválido.' });

@@ -9,7 +9,7 @@ const router = express.Router();
 // VER el detalle de un folio, incluida su lista de solicitudes) -- las
 // acciones de escritura se restringen aparte, por ruta, igual que
 // reparaciones.routes.js excluye vendedor solo de /refacciones.
-router.use(requireAuth, requireRole('admin', 'supervisor', 'tecnico', 'vendedor'));
+router.use(requireAuth, requireRole('admin', 'tecnico', 'vendedor'));
 
 const ESTADOS_VALIDOS = ['pendiente', 'aprobada', 'rechazada', 'recibida'];
 
@@ -37,7 +37,7 @@ router.get('/', async (req, res) => {
   res.json(rows);
 });
 
-router.post('/', requireRole('admin', 'supervisor', 'tecnico'), async (req, res) => {
+router.post('/', requireRole('admin', 'tecnico'), async (req, res) => {
   const { reparacion_id, producto_id, refaccion_id, descripcion_libre, costo_estimado } = req.body ?? {};
   if (!reparacion_id) return res.status(400).json({ error: 'reparacion_id es requerido.' });
   if (!producto_id && !refaccion_id && !descripcion_libre?.trim()) {
@@ -57,7 +57,7 @@ router.post('/', requireRole('admin', 'supervisor', 'tecnico'), async (req, res)
   res.status(201).json(rows[0]);
 });
 
-router.patch('/:id/aprobar', requireRole('admin', 'supervisor'), async (req, res) => {
+router.patch('/:id/aprobar', requireRole('admin'), async (req, res) => {
   const { producto_id, refaccion_id, costo_aprobado } = req.body ?? {};
 
   const actual = await pool.query(`SELECT * FROM reparacion_solicitudes_pieza WHERE id = $1`, [req.params.id]);
@@ -87,7 +87,7 @@ router.patch('/:id/aprobar', requireRole('admin', 'supervisor'), async (req, res
   res.json(rows[0]);
 });
 
-router.patch('/:id/rechazar', requireRole('admin', 'supervisor'), async (req, res) => {
+router.patch('/:id/rechazar', requireRole('admin'), async (req, res) => {
   const { motivo } = req.body ?? {};
 
   const actual = await pool.query(`SELECT estado FROM reparacion_solicitudes_pieza WHERE id = $1`, [req.params.id]);
@@ -107,7 +107,7 @@ router.patch('/:id/rechazar', requireRole('admin', 'supervisor'), async (req, re
 // pieza se consiguio por fuera) y recalcula el total de la reparacion,
 // igual que POST /reparaciones/:id/refacciones. registrar_gasto (opcional)
 // ademas la refleja en Gastos del local, igual que la compra de refacciones.
-router.post('/:id/recibir', requireRole('admin', 'supervisor', 'tecnico'), async (req, res) => {
+router.post('/:id/recibir', requireRole('admin', 'tecnico'), async (req, res) => {
   const { registrar_gasto } = req.body ?? {};
   const actual = await pool.query(
     `SELECT sp.*, r.folio, r.sucursal_id

@@ -5,8 +5,8 @@ const { requireAuth, requireRole, esAdminODueno } = require('../middleware/auth'
 const router = express.Router();
 
 // Tecnico puede VER el inventario (para elegir una refacción al reparar),
-// pero solo admin/supervisor puede dar de alta, editar o registrar compras.
-router.use(requireAuth, requireRole('admin', 'supervisor', 'tecnico'));
+// pero solo admin puede dar de alta, editar o registrar compras.
+router.use(requireAuth, requireRole('admin', 'tecnico'));
 
 router.get('/', async (req, res) => {
   const { sucursal_id, q } = req.query;
@@ -24,7 +24,7 @@ router.get('/', async (req, res) => {
   res.json(rows);
 });
 
-router.post('/', requireRole('admin', 'supervisor'), async (req, res) => {
+router.post('/', requireRole('admin'), async (req, res) => {
   const { sucursal_id, nombre, categoria, proveedor, costo, stock, stock_minimo } = req.body ?? {};
   if (!sucursal_id) return res.status(400).json({ error: 'sucursal_id es requerido.' });
   if (!nombre?.trim()) return res.status(400).json({ error: 'El nombre es requerido.' });
@@ -38,7 +38,7 @@ router.post('/', requireRole('admin', 'supervisor'), async (req, res) => {
   res.status(201).json(rows[0]);
 });
 
-router.patch('/:id', requireRole('admin', 'supervisor'), async (req, res) => {
+router.patch('/:id', requireRole('admin'), async (req, res) => {
   const campos = ['nombre', 'categoria', 'proveedor', 'costo', 'stock_minimo', 'activo'];
   const sets = [];
   const valores = [];
@@ -62,7 +62,7 @@ router.patch('/:id', requireRole('admin', 'supervisor'), async (req, res) => {
 // Registrar una compra de piezas para el local: suma stock, actualiza el
 // costo al ultimo pagado, y opcionalmente refleja el gasto en Gastos del
 // local (misma tabla que usa Corte de caja, sin endpoint nuevo).
-router.post('/:id/compra', requireRole('admin', 'supervisor'), async (req, res) => {
+router.post('/:id/compra', requireRole('admin'), async (req, res) => {
   const { cantidad, costo_unitario, registrar_gasto } = req.body ?? {};
   const cant = Number(cantidad);
   const costo = Number(costo_unitario);

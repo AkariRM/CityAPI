@@ -34,12 +34,7 @@ $$ LANGUAGE plpgsql;
 -- diferencia de 'admin', que queda asignado a una sola vía usuarios.empresa_id).
 -- 'pto' (Punto de Venta/Operador) es exclusivo de Áurea — vendedor+técnico
 -- de CityPhone no aplican ahí, es un rol operativo mucho más simple.
--- 'supervisor' es equivalente a 'admin' dentro de Ventas/Accesorios/
--- Reparaciones/Piezas/Gastos (incluye lo que hoy pueden vendedor+técnico
--- juntos, más las acciones "solo admin" de esos mismos módulos) pero NO
--- entra a Marketing, Finanzas, Administración/Usuarios/Configuración ni
--- Agente Web — ver requireRole(...) en cada archivo de rutas.
-CREATE TYPE rol_usuario AS ENUM ('dueño', 'admin', 'vendedor', 'tecnico', 'community_manager', 'pto', 'supervisor');
+CREATE TYPE rol_usuario AS ENUM ('dueño', 'admin', 'vendedor', 'tecnico', 'community_manager', 'pto');
 CREATE TYPE metodo_pago AS ENUM ('efectivo', 'tarjeta', 'credito');
 CREATE TYPE estado_venta AS ENUM ('completada', 'cancelada');
 CREATE TYPE tipo_producto AS ENUM ('nuevo', 'usado', 'accesorio', 'servicio');
