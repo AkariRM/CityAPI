@@ -95,6 +95,31 @@ router.post('/cm/generar-contenido', requireRole('admin', 'community_manager'), 
 // bucket igual que mejorar-imagen. Tarda mas que el resto y es caro de
 // repetir, asi que timeout ampliado y sin reintento automatico.
 const TIMEOUT_GENERAR_RECURSO_MS = 90000;
+
+// Resumen corto de lo que contesto n8n (strings largos, base64 incluido, se
+// recortan) para ver la respuesta real en vez de adivinar su forma.
+function resumirRespuesta(valor) {
+  const recortar = (v) => {
+    if (typeof v === 'string') return v.length > 80 ? `${v.slice(0, 60)}…[${v.length} chars]` : v;
+    if (Array.isArray(v)) return v.slice(0, 3).map(recortar);
+    if (v && typeof v === 'object') return Object.fromEntries(Object.entries(v).map(([k, x]) => [k, recortar(x)]));
+    return v;
+  };
+  return JSON.stringify(recortar(valor))?.slice(0, 400);
+}
+
+// Primer string http(s) dentro de un valor anidado — mientras TRAI no
+// documente en que forma manda el recurso, tolera objeto o lista.
+function primeraUrl(valor) {
+  if (typeof valor === 'string') return /^https?:\/\//i.test(valor) ? valor : null;
+  const hijos = Array.isArray(valor) ? valor : valor && typeof valor === 'object' ? Object.values(valor) : [];
+  for (const hijo of hijos) {
+    const url = primeraUrl(hijo);
+    if (url) return url;
+  }
+  return null;
+}
+
 router.post('/cm/generar-recurso', requireRole('admin', 'community_manager'), async (req, res) => {
   if (!validarEmpresa(req, res)) return;
   const faltan = faltantes(req.body, ['red_social', 'tipo_publicacion', 'hook']);
@@ -120,15 +145,21 @@ router.post('/cm/generar-recurso', requireRole('admin', 'community_manager'), as
       return res.status(502).json({ error: data.mensaje_error || 'La IA no pudo generar el recurso.' });
     }
 
-    const recurso = data?.recurso && typeof data.recurso === 'object' ? data.recurso.url ?? data.recurso.imagen : data?.recurso;
-    if (!recurso || typeof recurso !== 'string') return res.status(502).json({ error: 'La IA no devolvió un recurso.' });
+    const recurso = typeof data?.recurso === 'string' ? data.recurso : primeraUrl(data?.recurso);
+    if (!recurso) {
+      const resumen = resumirRespuesta(data);
+      console.error('generar-recurso: respuesta inesperada de n8n:', resumen);
+      return res.status(502).json({ error: `La IA no devolvió un recurso. Respuesta de n8n: ${resumen}` });
+    }
 
     if (/^https?:\/\//i.test(recurso)) return res.json({ url: recurso });
 
     const match = /^data:(image\/\w+);base64,(.+)$/.exec(recurso);
     const buffer = Buffer.from(match ? match[2] : recurso, 'base64');
     const mimeType = match?.[1] ?? detectarTipoReal(buffer);
-    if (!mimeType) return res.status(502).json({ error: 'El recurso que devolvió la IA no es una imagen válida.' });
+    if (!mimeType) {
+      return res.status(502).json({ error: `El recurso que devolvió la IA no es una imagen válida: ${resumirRespuesta(recurso)}` });
+    }
 
     const { url } = await subirBufferABucket(buffer, mimeType);
     res.json({ url });
