@@ -7,9 +7,9 @@ const TIMEOUT_MS = 60000;
 // Un solo lugar para: header de autenticacion saliente (X-Webhook-Secret),
 // timeout, y un reintento automatico antes de fallar — asi los 6 endpoints
 // de n8n.routes.js no duplican este comportamiento cada uno por su lado.
-async function intentarLlamada(url, payload) {
+async function intentarLlamada(url, payload, timeoutMs) {
   const controller = new AbortController();
-  const timeout = setTimeout(() => controller.abort(), TIMEOUT_MS);
+  const timeout = setTimeout(() => controller.abort(), timeoutMs);
   try {
     const res = await fetch(url, {
       method: 'POST',
@@ -28,16 +28,23 @@ async function intentarLlamada(url, payload) {
   }
 }
 
-async function llamarWebhookN8n(url, payload) {
+// timeoutMs / reintentar son opcionales: generar un recurso grafico tarda
+// mas que el resto y es caro de repetir, asi que ahi se amplia el timeout y
+// se apaga el reintento automatico (ver /cm/generar-recurso).
+async function llamarWebhookN8n(url, payload, { timeoutMs = TIMEOUT_MS, reintentar = true } = {}) {
   if (!url) throw Object.assign(new Error('Automatización no configurada en el servidor.'), { statusCode: 500 });
   try {
-    return await intentarLlamada(url, payload);
-  } catch {
+    return await intentarLlamada(url, payload, timeoutMs);
+  } catch (primerError) {
+    if (!reintentar) {
+      console.error('n8n webhook falló (sin reintento):', primerError);
+      throw Object.assign(new Error('No se pudo contactar el servicio de IA. Intenta de nuevo.'), { statusCode: 502 });
+    }
     // Un reintento antes de rendirse — los workflows de IA a veces truenan
     // por un timeout transitorio del lado de n8n, no vale la pena fallarle
     // al usuario de una sola vez.
     try {
-      return await intentarLlamada(url, payload);
+      return await intentarLlamada(url, payload, timeoutMs);
     } catch (err) {
       console.error('n8n webhook falló tras reintento:', err);
       throw Object.assign(new Error('No se pudo contactar el servicio de IA. Intenta de nuevo.'), { statusCode: 502 });

@@ -1,7 +1,7 @@
 const express = require('express');
 const { requireAuth, requireRole } = require('../middleware/auth');
 const { llamarWebhookN8n } = require('../utils/n8n');
-const { subirBufferABucket } = require('../utils/almacenamiento');
+const { subirBufferABucket, detectarTipoReal } = require('../utils/almacenamiento');
 
 const router = express.Router();
 router.use(requireAuth);
@@ -85,6 +85,56 @@ router.post('/cm/generar-contenido', requireRole('admin', 'community_manager'), 
     tipo_publicacion: req.body.tipo_publicacion,
     productos: req.body.productos,
   });
+});
+
+// 3b — Generacion del recurso grafico (imagen/historia/reel) con IA a partir
+// del texto que ya se eligio en /cm/generar-contenido. n8n contesta con el
+// mismo envelope que las notificaciones ({ status, recurso, mensaje_error });
+// "recurso" se normaliza siempre a una URL: si ya viene como URL se deja tal
+// cual (puede ser un video), si viene como imagen en base64 se sube a nuestro
+// bucket igual que mejorar-imagen. Tarda mas que el resto y es caro de
+// repetir, asi que timeout ampliado y sin reintento automatico.
+const TIMEOUT_GENERAR_RECURSO_MS = 90000;
+router.post('/cm/generar-recurso', requireRole('admin', 'community_manager'), async (req, res) => {
+  if (!validarEmpresa(req, res)) return;
+  const faltan = faltantes(req.body, ['red_social', 'tipo_publicacion', 'hook']);
+  if (faltan.length) return res.status(400).json({ error: `Faltan campos: ${faltan.join(', ')}.` });
+
+  try {
+    const { data } = await llamarWebhookN8n(
+      process.env.N8N_WEBHOOK_CM_GENERAR_RECURSO,
+      {
+        ...contexto(req),
+        empresa: req.body.empresa,
+        red_social: req.body.red_social,
+        tipo_publicacion: req.body.tipo_publicacion,
+        hook: req.body.hook,
+        descripcion: req.body.descripcion ?? '',
+        cta: req.body.cta ?? '',
+        productos: Array.isArray(req.body.productos) ? req.body.productos : [],
+      },
+      { timeoutMs: TIMEOUT_GENERAR_RECURSO_MS, reintentar: false }
+    );
+
+    if (data?.status === 'error') {
+      return res.status(502).json({ error: data.mensaje_error || 'La IA no pudo generar el recurso.' });
+    }
+
+    const recurso = data?.recurso && typeof data.recurso === 'object' ? data.recurso.url ?? data.recurso.imagen : data?.recurso;
+    if (!recurso || typeof recurso !== 'string') return res.status(502).json({ error: 'La IA no devolvió un recurso.' });
+
+    if (/^https?:\/\//i.test(recurso)) return res.json({ url: recurso });
+
+    const match = /^data:(image\/\w+);base64,(.+)$/.exec(recurso);
+    const buffer = Buffer.from(match ? match[2] : recurso, 'base64');
+    const mimeType = match?.[1] ?? detectarTipoReal(buffer);
+    if (!mimeType) return res.status(502).json({ error: 'El recurso que devolvió la IA no es una imagen válida.' });
+
+    const { url } = await subirBufferABucket(buffer, mimeType);
+    res.json({ url });
+  } catch (err) {
+    res.status(err.statusCode ?? 500).json({ error: err.statusCode ? err.message : 'Error interno del servidor.' });
+  }
 });
 
 // 4 — Publicacion de contenido con IA (enrutado por red social)
