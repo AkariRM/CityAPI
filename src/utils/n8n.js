@@ -20,9 +20,21 @@ async function intentarLlamada(url, payload, timeoutMs) {
       body: JSON.stringify(payload),
       signal: controller.signal,
     });
-    const data = await res.json().catch(() => null);
-    if (!res.ok) throw new Error(data?.mensaje ?? `n8n respondió ${res.status}`);
-    return { status: res.status, data };
+    // El cuerpo se lee como bytes (no res.json()) porque algunos workflows
+    // devuelven el archivo generado directo o texto plano, no JSON; asi quien
+    // llama puede decidir que hacer cuando data === null.
+    const buffer = Buffer.from(await res.arrayBuffer());
+    const contentType = res.headers.get('content-type') ?? '';
+    let data = null;
+    if (/json/i.test(contentType) || buffer[0] === 0x7b || buffer[0] === 0x5b) {
+      try {
+        data = JSON.parse(buffer.toString('utf8'));
+      } catch {
+        // no era JSON valido — data se queda en null y el buffer sigue disponible
+      }
+    }
+    if (!res.ok) throw new Error(data?.mensaje ?? data?.mensaje_error ?? `n8n respondió ${res.status}`);
+    return { status: res.status, data, contentType, buffer };
   } finally {
     clearTimeout(timeout);
   }

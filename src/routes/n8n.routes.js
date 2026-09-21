@@ -108,6 +108,16 @@ function resumirRespuesta(valor) {
   return JSON.stringify(recortar(valor))?.slice(0, 400);
 }
 
+// Cuando n8n no contesta JSON: tipo de contenido, tamano y el inicio del
+// cuerpo (como texto si es legible, en hexadecimal si es binario).
+function describirCuerpo(buffer, contentType) {
+  const base = `${contentType || 'sin content-type'}, ${buffer?.length ?? 0} bytes`;
+  if (!buffer?.length) return `respuesta vacía (${base})`;
+  const inicio = buffer.subarray(0, 16);
+  const esTexto = inicio.every((b) => b === 9 || b === 10 || b === 13 || (b >= 32 && b < 127));
+  return `${base}, inicio: ${esTexto ? JSON.stringify(buffer.subarray(0, 80).toString('utf8')) : inicio.toString('hex')}`;
+}
+
 // Primer string http(s) dentro de un valor anidado — mientras TRAI no
 // documente en que forma manda el recurso, tolera objeto o lista.
 function primeraUrl(valor) {
@@ -126,7 +136,7 @@ router.post('/cm/generar-recurso', requireRole('admin', 'community_manager'), as
   if (faltan.length) return res.status(400).json({ error: `Faltan campos: ${faltan.join(', ')}.` });
 
   try {
-    const { data } = await llamarWebhookN8n(
+    const { data, buffer, contentType } = await llamarWebhookN8n(
       process.env.N8N_WEBHOOK_CM_GENERAR_RECURSO,
       {
         ...contexto(req),
@@ -145,23 +155,38 @@ router.post('/cm/generar-recurso', requireRole('admin', 'community_manager'), as
       return res.status(502).json({ error: data.mensaje_error || 'La IA no pudo generar el recurso.' });
     }
 
-    const recurso = typeof data?.recurso === 'string' ? data.recurso : primeraUrl(data?.recurso);
+    let recurso = null;
+    if (data) {
+      recurso = typeof data.recurso === 'string' ? data.recurso : primeraUrl(data.recurso);
+    } else if (buffer?.length) {
+      // n8n no contesto JSON: o devolvio el archivo directo (binario) o un
+      // texto plano con la URL / el base64 de la imagen.
+      const tipoBinario = detectarTipoReal(buffer);
+      if (tipoBinario) {
+        const { url } = await subirBufferABucket(buffer, tipoBinario);
+        return res.json({ url });
+      }
+      const texto = buffer.toString('utf8').trim();
+      if (/^https?:\/\/\S+$/i.test(texto) || /^data:image\/\w+;base64,/.test(texto) || /^[A-Za-z0-9+/=\r\n]{200,}$/.test(texto)) {
+        recurso = texto;
+      }
+    }
     if (!recurso) {
-      const resumen = resumirRespuesta(data);
-      console.error('generar-recurso: respuesta inesperada de n8n:', resumen);
-      return res.status(502).json({ error: `La IA no devolvió un recurso. Respuesta de n8n: ${resumen}` });
+      const detalle = data ? resumirRespuesta(data) : describirCuerpo(buffer, contentType);
+      console.error('generar-recurso: respuesta inesperada de n8n:', detalle);
+      return res.status(502).json({ error: `La IA no devolvió un recurso. Respuesta de n8n: ${detalle}` });
     }
 
     if (/^https?:\/\//i.test(recurso)) return res.json({ url: recurso });
 
     const match = /^data:(image\/\w+);base64,(.+)$/.exec(recurso);
-    const buffer = Buffer.from(match ? match[2] : recurso, 'base64');
-    const mimeType = match?.[1] ?? detectarTipoReal(buffer);
+    const imagen = Buffer.from(match ? match[2] : recurso, 'base64');
+    const mimeType = match?.[1] ?? detectarTipoReal(imagen);
     if (!mimeType) {
       return res.status(502).json({ error: `El recurso que devolvió la IA no es una imagen válida: ${resumirRespuesta(recurso)}` });
     }
 
-    const { url } = await subirBufferABucket(buffer, mimeType);
+    const { url } = await subirBufferABucket(imagen, mimeType);
     res.json({ url });
   } catch (err) {
     res.status(err.statusCode ?? 500).json({ error: err.statusCode ? err.message : 'Error interno del servidor.' });
