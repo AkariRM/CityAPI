@@ -9,7 +9,6 @@ const router = express.Router();
 router.use(requireAuth, requireRole('admin', 'vendedor'));
 
 const METODOS_VALIDOS = ['efectivo', 'tarjeta', 'credito'];
-const TIPOS_PRECIO_VALIDOS = ['publico', 'revendedor', 'mayoreo'];
 
 // Total de ventas de un dia, sin costos ni utilidad — a diferencia de
 // /finanzas/resumen (solo admin), esto lo puede ver tambien el vendedor
@@ -170,18 +169,24 @@ router.post('/', async (req, res) => {
   try {
     await client.query('BEGIN');
 
+    // El nivel de precio (publico/revendedor/mayoreo) se resuelve UNA vez por
+    // venta, a partir del cliente registrado — nunca se acepta un tipo_precio
+    // mandado por el frontend, mismo criterio de "nunca confiar en el
+    // cliente" que ya aplica al monto. Sin cliente, siempre es publico.
+    let tipoPrecioVenta = 'publico';
+    if (cliente_id) {
+      const clienteResult = await client.query(`SELECT tipo_precio FROM clientes WHERE id = $1`, [cliente_id]);
+      if (!clienteResult.rows[0]) throw Object.assign(new Error('Cliente no encontrado.'), { statusCode: 400 });
+      tipoPrecioVenta = clienteResult.rows[0].tipo_precio;
+    }
+
     // Resultados por LINEA (no por producto_id): dos lineas distintas pueden
-    // compartir el mismo producto_id (ej. dos unidades IMEI del mismo modelo)
-    // y cada una debe poder llevar su propio tipo_precio sin pisar a la otra.
+    // compartir el mismo producto_id (ej. dos unidades IMEI del mismo modelo).
     const resultados = [];
     for (const item of items) {
       // El precio se toma siempre del catálogo, nunca de un monto que mande
       // el cliente — de lo contrario cualquiera con el token de un vendedor
-      // podría cobrar lo que quisiera por una venta. Lo único seleccionable
-      // es a cuál de las 3 listas de precio ya cargadas en el producto
-      // (público con precio especial resuelto / revendedor / mayoreo)
-      // pertenece esta línea — tipo_precio es un valor de una lista fija,
-      // nunca un número.
+      // podría cobrar lo que quisiera por una venta.
       const producto = await client.query(
         `SELECT p.tipo, p.nombre, p.precio_mayoreo, p.precio_revendedor,
                 COALESCE(pe_cliente.precio, pe_rol.precio, p.precio_venta) AS precio_venta
@@ -193,10 +198,9 @@ router.post('/', async (req, res) => {
       );
       if (!producto.rows[0]) throw Object.assign(new Error('Producto no encontrado.'), { statusCode: 400 });
 
-      const tipoPrecio = TIPOS_PRECIO_VALIDOS.includes(item.tipo_precio) ? item.tipo_precio : 'publico';
       let precioResuelto = Number(producto.rows[0].precio_venta);
-      if (tipoPrecio === 'mayoreo' && producto.rows[0].precio_mayoreo != null) precioResuelto = Number(producto.rows[0].precio_mayoreo);
-      else if (tipoPrecio === 'revendedor' && producto.rows[0].precio_revendedor != null) precioResuelto = Number(producto.rows[0].precio_revendedor);
+      if (tipoPrecioVenta === 'mayoreo' && producto.rows[0].precio_mayoreo != null) precioResuelto = Number(producto.rows[0].precio_mayoreo);
+      else if (tipoPrecioVenta === 'revendedor' && producto.rows[0].precio_revendedor != null) precioResuelto = Number(producto.rows[0].precio_revendedor);
 
       resultados.push({ tipo: producto.rows[0].tipo, nombre: producto.rows[0].nombre, precio: precioResuelto });
 

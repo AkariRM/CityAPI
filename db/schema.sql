@@ -47,6 +47,9 @@ CREATE TYPE prioridad_reparacion AS ENUM ('baja', 'media', 'alta');
 CREATE TYPE etiqueta_foto_reparacion AS ENUM ('antes', 'despues', 'diagnostico');
 CREATE TYPE canal_notificacion_cliente AS ENUM ('whatsapp', 'sms');
 CREATE TYPE estado_solicitud_pieza AS ENUM ('pendiente', 'aprobada', 'rechazada', 'recibida');
+-- Nivel de precio (Precio 1/2/3 del catalogo) asignado a un cliente --
+-- Punto de Venta lo aplica solo a toda la venta segun el cliente elegido.
+CREATE TYPE tipo_precio_cliente AS ENUM ('publico', 'revendedor', 'mayoreo');
 CREATE TYPE estado_notificacion_cliente AS ENUM ('pendiente', 'enviado', 'fallido');
 CREATE TYPE plataforma_publicacion AS ENUM ('instagram', 'facebook');
 CREATE TYPE estado_publicacion AS ENUM ('pendiente', 'programado', 'rechazado', 'publicado');
@@ -152,6 +155,7 @@ CREATE TABLE clientes (
   direccion   text,
   notas       text,
   sucursal_id uuid REFERENCES sucursales(id),
+  tipo_precio tipo_precio_cliente NOT NULL DEFAULT 'publico',
   created_at  timestamptz NOT NULL DEFAULT now(),
   updated_at  timestamptz NOT NULL DEFAULT now()
 );

@@ -6,10 +6,12 @@ const router = express.Router();
 
 router.use(requireAuth, requireRole('admin', 'vendedor', 'tecnico'));
 
+const TIPOS_PRECIO_VALIDOS = ['publico', 'revendedor', 'mayoreo'];
+
 router.get('/', async (req, res) => {
   const { q } = req.query;
   const { rows } = await pool.query(
-    `SELECT c.id, c.nombre, c.telefono, c.email, c.direccion, c.notas, c.created_at,
+    `SELECT c.id, c.nombre, c.telefono, c.email, c.direccion, c.notas, c.tipo_precio, c.created_at,
             COALESCE(v.numero_compras, 0) AS numero_compras,
             COALESCE(r.numero_reparaciones, 0) AS numero_reparaciones,
             GREATEST(v.ultima_compra, r.ultima_reparacion) AS ultima_visita
@@ -50,7 +52,7 @@ async function abonosAgrupados(tabla, columnaPadre, idsPadre) {
 }
 
 router.get('/:id', async (req, res) => {
-  const { rows } = await pool.query(`SELECT id, nombre, telefono, email, direccion, notas, created_at FROM clientes WHERE id = $1`, [req.params.id]);
+  const { rows } = await pool.query(`SELECT id, nombre, telefono, email, direccion, notas, tipo_precio, created_at FROM clientes WHERE id = $1`, [req.params.id]);
   const cliente = rows[0];
   if (!cliente) return res.status(404).json({ error: 'Cliente no encontrado.' });
 
@@ -88,19 +90,32 @@ router.get('/:id', async (req, res) => {
 });
 
 router.post('/', async (req, res) => {
-  const { nombre, telefono, email, direccion, notas } = req.body ?? {};
+  const { nombre, telefono, email, direccion, notas, tipo_precio } = req.body ?? {};
   if (!nombre?.trim()) return res.status(400).json({ error: 'El nombre es requerido.' });
+  if (tipo_precio !== undefined && !TIPOS_PRECIO_VALIDOS.includes(tipo_precio)) {
+    return res.status(400).json({ error: 'tipo_precio inválido.' });
+  }
 
   const { rows } = await pool.query(
-    `INSERT INTO clientes (nombre, telefono, email, direccion, notas) VALUES ($1, $2, $3, $4, $5)
-     RETURNING id, nombre, telefono, email, direccion, notas, created_at`,
-    [nombre.trim(), telefono || null, email || null, direccion || null, notas || null]
+    `INSERT INTO clientes (nombre, telefono, email, direccion, notas, tipo_precio) VALUES ($1, $2, $3, $4, $5, $6)
+     RETURNING id, nombre, telefono, email, direccion, notas, tipo_precio, created_at`,
+    [nombre.trim(), telefono || null, email || null, direccion || null, notas || null, tipo_precio || 'publico']
   );
   res.status(201).json(rows[0]);
 });
 
 router.patch('/:id', async (req, res) => {
-  const fields = { nombre: req.body?.nombre, telefono: req.body?.telefono, email: req.body?.email, direccion: req.body?.direccion, notas: req.body?.notas };
+  if (req.body?.tipo_precio !== undefined && !TIPOS_PRECIO_VALIDOS.includes(req.body.tipo_precio)) {
+    return res.status(400).json({ error: 'tipo_precio inválido.' });
+  }
+  const fields = {
+    nombre: req.body?.nombre,
+    telefono: req.body?.telefono,
+    email: req.body?.email,
+    direccion: req.body?.direccion,
+    notas: req.body?.notas,
+    tipo_precio: req.body?.tipo_precio,
+  };
   const sets = [];
   const values = [];
   let i = 1;
@@ -115,7 +130,7 @@ router.patch('/:id', async (req, res) => {
   values.push(req.params.id);
   const { rows } = await pool.query(
     `UPDATE clientes SET ${sets.join(', ')} WHERE id = $${i}
-     RETURNING id, nombre, telefono, email, direccion, notas, created_at`,
+     RETURNING id, nombre, telefono, email, direccion, notas, tipo_precio, created_at`,
     values
   );
   if (!rows[0]) return res.status(404).json({ error: 'Cliente no encontrado.' });
