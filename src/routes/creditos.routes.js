@@ -1,6 +1,7 @@
 const express = require('express');
 const { pool } = require('../db');
 const { requireAuth, requireRole } = require('../middleware/auth');
+const { marcarCreditosVencidos } = require('../utils/creditos');
 
 const router = express.Router();
 router.use(requireAuth, requireRole('admin', 'vendedor'));
@@ -10,9 +11,10 @@ const ESTADOS_VALIDOS = ['activo', 'pagado', 'vencido', 'cancelado'];
 
 router.get('/', async (req, res) => {
   const { cliente_id, estado } = req.query;
+  await marcarCreditosVencidos(pool);
   const { rows } = await pool.query(
     `SELECT c.id, c.cliente_id, cl.nombre AS cliente_nombre, c.venta_id, v.folio AS venta_folio,
-            c.monto_total, c.saldo_pendiente, c.limite_aprobado, c.condiciones, c.estado,
+            c.monto_total, c.saldo_pendiente, c.limite_aprobado, c.condiciones, c.estado, c.fecha_vencimiento,
             c.autorizado_por, u.nombre AS autorizado_por_nombre, c.created_at, c.updated_at
      FROM creditos c
      JOIN clientes cl ON cl.id = c.cliente_id
@@ -27,10 +29,11 @@ router.get('/', async (req, res) => {
 });
 
 router.get('/:id', async (req, res) => {
+  await marcarCreditosVencidos(pool);
   const creditoResult = await pool.query(
     `SELECT c.id, c.cliente_id, cl.nombre AS cliente_nombre, cl.telefono AS cliente_telefono,
             c.venta_id, v.folio AS venta_folio, c.monto_total, c.saldo_pendiente,
-            c.limite_aprobado, c.condiciones, c.estado, c.autorizado_por, u.nombre AS autorizado_por_nombre,
+            c.limite_aprobado, c.condiciones, c.estado, c.fecha_vencimiento, c.autorizado_por, u.nombre AS autorizado_por_nombre,
             c.created_at, c.updated_at
      FROM creditos c
      JOIN clientes cl ON cl.id = c.cliente_id
@@ -56,7 +59,8 @@ router.get('/:id', async (req, res) => {
 // Autorizacion de credito independiente de una venta puntual (ej. abrir una
 // cuenta/tab para un cliente). El flujo mas comun es vender "a credito"
 // desde el Punto de Venta (ver POST /ventas), que crea este mismo tipo de
-// registro automaticamente con venta_id.
+// registro automaticamente con venta_id -- mismas reglas de politica de
+// cliente (permite_credito/limite_credito) aplicadas ahi tambien.
 router.post('/', requireRole('admin'), async (req, res) => {
   const { cliente_id, monto_total, limite_aprobado, condiciones } = req.body ?? {};
   if (!cliente_id) return res.status(400).json({ error: 'cliente_id es requerido.' });
@@ -65,20 +69,48 @@ router.post('/', requireRole('admin'), async (req, res) => {
     return res.status(400).json({ error: 'El monto no puede superar el límite aprobado.' });
   }
 
+  const clienteResult = await pool.query(
+    `SELECT permite_credito, limite_credito, plazo_dias_credito FROM clientes WHERE id = $1`,
+    [cliente_id]
+  );
+  const cliente = clienteResult.rows[0];
+  if (!cliente) return res.status(404).json({ error: 'Cliente no encontrado.' });
+  if (!cliente.permite_credito) return res.status(403).json({ error: 'Este cliente no está autorizado para comprar a crédito.' });
+
+  if (cliente.limite_credito != null) {
+    const expuesto = await pool.query(
+      `SELECT COALESCE(sum(saldo_pendiente), 0) AS total FROM creditos WHERE cliente_id = $1 AND estado IN ('activo', 'vencido')`,
+      [cliente_id]
+    );
+    const nuevoTotal = Number(expuesto.rows[0].total) + Number(monto_total);
+    if (nuevoTotal > Number(cliente.limite_credito)) {
+      return res.status(400).json({
+        error: `Este crédito supera el límite del cliente (debe $${Number(expuesto.rows[0].total).toFixed(2)} de $${Number(cliente.limite_credito).toFixed(2)}).`,
+      });
+    }
+  }
+
+  let fechaVencimiento = null;
+  if (cliente.plazo_dias_credito) {
+    const fecha = new Date();
+    fecha.setDate(fecha.getDate() + Number(cliente.plazo_dias_credito));
+    fechaVencimiento = fecha.toISOString().slice(0, 10);
+  }
+
   const { rows } = await pool.query(
-    `INSERT INTO creditos (cliente_id, monto_total, saldo_pendiente, autorizado_por, limite_aprobado, condiciones)
-     VALUES ($1, $2, $2, $3, $4, $5)
-     RETURNING id, cliente_id, monto_total, saldo_pendiente, limite_aprobado, condiciones, estado, autorizado_por, created_at`,
-    [cliente_id, Number(monto_total), req.usuario.sub, limite_aprobado ?? null, condiciones || null]
+    `INSERT INTO creditos (cliente_id, monto_total, saldo_pendiente, autorizado_por, limite_aprobado, condiciones, fecha_vencimiento)
+     VALUES ($1, $2, $2, $3, $4, $5, $6)
+     RETURNING id, cliente_id, monto_total, saldo_pendiente, limite_aprobado, condiciones, estado, fecha_vencimiento, autorizado_por, created_at`,
+    [cliente_id, Number(monto_total), req.usuario.sub, limite_aprobado ?? null, condiciones || null, fechaVencimiento]
   );
   res.status(201).json(rows[0]);
 });
 
 router.patch('/:id', requireRole('admin'), async (req, res) => {
-  const { estado, condiciones, limite_aprobado } = req.body ?? {};
+  const { estado, condiciones, limite_aprobado, fecha_vencimiento } = req.body ?? {};
   if (estado !== undefined && !ESTADOS_VALIDOS.includes(estado)) return res.status(400).json({ error: 'Estado inválido.' });
 
-  const fields = { estado, condiciones, limite_aprobado };
+  const fields = { estado, condiciones, limite_aprobado, fecha_vencimiento };
   const sets = [];
   const values = [];
   let i = 1;
@@ -94,7 +126,7 @@ router.patch('/:id', requireRole('admin'), async (req, res) => {
   values.push(req.params.id);
   const { rows } = await pool.query(
     `UPDATE creditos SET ${sets.join(', ')} WHERE id = $${i}
-     RETURNING id, cliente_id, monto_total, saldo_pendiente, limite_aprobado, condiciones, estado, updated_at`,
+     RETURNING id, cliente_id, monto_total, saldo_pendiente, limite_aprobado, condiciones, estado, fecha_vencimiento, updated_at`,
     values
   );
   if (!rows[0]) return res.status(404).json({ error: 'Crédito no encontrado.' });
@@ -116,7 +148,11 @@ router.post('/:id/abonos', async (req, res) => {
     const creditoResult = await client.query(`SELECT saldo_pendiente, estado FROM creditos WHERE id = $1 FOR UPDATE`, [req.params.id]);
     const credito = creditoResult.rows[0];
     if (!credito) throw Object.assign(new Error('Crédito no encontrado.'), { statusCode: 404 });
-    if (credito.estado !== 'activo') throw Object.assign(new Error('Este crédito ya no está activo.'), { statusCode: 409 });
+    // "vencido" (atrasado) sigue aceptando abonos -- de hecho es el caso mas
+    // importante a permitir, solo "pagado"/"cancelado" ya estan cerrados.
+    if (!['activo', 'vencido'].includes(credito.estado)) {
+      throw Object.assign(new Error('Este crédito ya no está activo.'), { statusCode: 409 });
+    }
     if (Number(monto) > Number(credito.saldo_pendiente)) {
       throw Object.assign(new Error('El abono no puede ser mayor al saldo pendiente.'), { statusCode: 400 });
     }

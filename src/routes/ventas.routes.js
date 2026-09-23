@@ -174,10 +174,21 @@ router.post('/', async (req, res) => {
     // mandado por el frontend, mismo criterio de "nunca confiar en el
     // cliente" que ya aplica al monto. Sin cliente, siempre es publico.
     let tipoPrecioVenta = 'publico';
+    let clientePolitica = null;
     if (cliente_id) {
-      const clienteResult = await client.query(`SELECT tipo_precio FROM clientes WHERE id = $1`, [cliente_id]);
+      const clienteResult = await client.query(
+        `SELECT tipo_precio, permite_credito, limite_credito, plazo_dias_credito FROM clientes WHERE id = $1`,
+        [cliente_id]
+      );
       if (!clienteResult.rows[0]) throw Object.assign(new Error('Cliente no encontrado.'), { statusCode: 400 });
       tipoPrecioVenta = clienteResult.rows[0].tipo_precio;
+      clientePolitica = clienteResult.rows[0];
+    }
+    // La autorizacion de credito (permite_credito/limite_credito) es politica
+    // del cliente (ver ClienteFormModal) -- independiente de que el rol ya
+    // tenga que ser Admin/Dueño para elegir "credito" como metodo de pago.
+    if (metodo_pago === 'credito' && !clientePolitica?.permite_credito) {
+      throw Object.assign(new Error('Este cliente no está autorizado para comprar a crédito.'), { statusCode: 403 });
     }
 
     // Resultados por LINEA (no por producto_id): dos lineas distintas pueden
@@ -284,11 +295,31 @@ router.post('/', async (req, res) => {
 
     let credito = null;
     if (metodo_pago === 'credito') {
+      if (clientePolitica.limite_credito != null) {
+        const expuesto = await client.query(
+          `SELECT COALESCE(sum(saldo_pendiente), 0) AS total FROM creditos WHERE cliente_id = $1 AND estado IN ('activo', 'vencido')`,
+          [cliente_id]
+        );
+        const nuevoTotal = Number(expuesto.rows[0].total) + total;
+        if (nuevoTotal > Number(clientePolitica.limite_credito)) {
+          throw Object.assign(
+            new Error(`Esta venta a crédito supera el límite del cliente (debe $${Number(expuesto.rows[0].total).toFixed(2)} de $${Number(clientePolitica.limite_credito).toFixed(2)}).`),
+            { statusCode: 400 }
+          );
+        }
+      }
+      let fechaVencimiento = null;
+      if (clientePolitica.plazo_dias_credito) {
+        const fecha = new Date();
+        fecha.setDate(fecha.getDate() + Number(clientePolitica.plazo_dias_credito));
+        fechaVencimiento = fecha.toISOString().slice(0, 10);
+      }
+
       const creditoResult = await client.query(
-        `INSERT INTO creditos (cliente_id, venta_id, monto_total, saldo_pendiente, autorizado_por, limite_aprobado, condiciones)
-         VALUES ($1, $2, $3, $3, $4, $5, $6)
-         RETURNING id, monto_total, saldo_pendiente, limite_aprobado, condiciones`,
-        [cliente_id, venta.id, total, req.usuario.sub, limite_aprobado ?? null, condiciones || null]
+        `INSERT INTO creditos (cliente_id, venta_id, monto_total, saldo_pendiente, autorizado_por, limite_aprobado, condiciones, fecha_vencimiento)
+         VALUES ($1, $2, $3, $3, $4, $5, $6, $7)
+         RETURNING id, monto_total, saldo_pendiente, limite_aprobado, condiciones, fecha_vencimiento`,
+        [cliente_id, venta.id, total, req.usuario.sub, limite_aprobado ?? null, condiciones || null, fechaVencimiento]
       );
       credito = creditoResult.rows[0];
     }

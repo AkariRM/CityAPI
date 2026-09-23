@@ -156,6 +156,11 @@ CREATE TABLE clientes (
   notas       text,
   sucursal_id uuid REFERENCES sucursales(id),
   tipo_precio tipo_precio_cliente NOT NULL DEFAULT 'publico',
+  -- Politica de credito del cliente, independiente de tipo_precio -- ver
+  -- migracion_credito_cliente.sql.
+  permite_credito     boolean NOT NULL DEFAULT false,
+  limite_credito      numeric(12,2),
+  plazo_dias_credito  integer,
   created_at  timestamptz NOT NULL DEFAULT now(),
   updated_at  timestamptz NOT NULL DEFAULT now()
 );
@@ -449,6 +454,9 @@ CREATE TABLE creditos (
   limite_aprobado   numeric(12,2),
   condiciones       text,
   estado            estado_credito NOT NULL DEFAULT 'activo',
+  -- Calculada al crear el credito a partir de clientes.plazo_dias_credito
+  -- (ver src/utils/creditos.js para como se usa).
+  fecha_vencimiento date,
   created_at        timestamptz NOT NULL DEFAULT now(),
   updated_at        timestamptz NOT NULL DEFAULT now()
 );
