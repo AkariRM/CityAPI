@@ -3,6 +3,7 @@ const { pool } = require('../db');
 const { requireAuth, requireRole } = require('../middleware/auth');
 const { inicioDiaUTC, finDiaUTCExclusivo } = require('../utils/fechas');
 const { obtenerConfiguracionTicket } = require('../utils/configuracionTicket');
+const { registrarMovimientoRefaccion } = require('../utils/movimientosRefacciones');
 
 const router = express.Router();
 
@@ -36,7 +37,7 @@ router.get('/refacciones/reporte', async (req, res) => {
 // NULL como "sin asignar"); dias_promedio se calcula de recepcion a la
 // primera vez que el folio paso por 'entregado' en el historial.
 router.get('/reporte-tecnicos', requireRole('admin'), async (req, res) => {
-  const { desde, hasta } = req.query;
+  const { desde, hasta, sucursal_id } = req.query;
   const { rows } = await pool.query(
     `WITH entregas AS (
        SELECT reparacion_id, MIN(created_at) AS fecha_entrega
@@ -54,9 +55,10 @@ router.get('/reporte-tecnicos', requireRole('admin'), async (req, res) => {
      LEFT JOIN entregas e ON e.reparacion_id = r.id
      WHERE ($1::timestamptz IS NULL OR r.created_at >= $1::timestamptz)
        AND ($2::timestamptz IS NULL OR r.created_at < $2::timestamptz)
+       AND ($3::uuid IS NULL OR r.sucursal_id = $3::uuid)
      GROUP BY r.tecnico_id, t.nombre
      ORDER BY total_facturado DESC`,
-    [desde ? inicioDiaUTC(desde) : null, hasta ? finDiaUTCExclusivo(hasta) : null]
+    [desde ? inicioDiaUTC(desde) : null, hasta ? finDiaUTCExclusivo(hasta) : null, sucursal_id || null]
   );
   res.json(rows);
 });
@@ -89,9 +91,9 @@ router.get('/', async (req, res) => {
 
 router.get('/:id', async (req, res) => {
   const reparacionResult = await pool.query(
-    `SELECT r.id, r.folio, r.cliente_id, c.nombre AS cliente_nombre, c.telefono AS cliente_telefono, r.sucursal_id,
+    `SELECT r.id, r.folio, r.cliente_id, c.nombre AS cliente_nombre, c.telefono AS cliente_telefono, c.telefono_adicional AS cliente_telefono_adicional, r.sucursal_id,
             s.nombre AS sucursal_nombre, s.direccion AS sucursal_direccion, s.telefono AS sucursal_telefono,
-            r.equipo_marca, r.equipo_modelo, r.imei_equipo, r.equipo_contrasena, r.problema_reportado, r.diagnostico,
+            r.equipo_marca, r.equipo_modelo, r.imei_equipo, r.equipo_contrasena, r.equipo_enciende, r.problema_reportado, r.diagnostico,
             r.estado, r.prioridad, r.tecnico_id, t.nombre AS tecnico_nombre,
             r.costo_mano_obra, r.costo_refacciones, r.total, r.garantia_dias, r.monto_pagado,
             r.fecha_estimada_entrega, r.nota_para_cliente, r.checklist_revision,
@@ -167,8 +169,8 @@ router.get('/:id', async (req, res) => {
 
 router.post('/', requireRole('admin', 'vendedor', 'tecnico'), async (req, res) => {
   const {
-    cliente_id, sucursal_id, telefono, equipo_marca, equipo_modelo, imei_equipo, equipo_contrasena, problema_reportado, prioridad,
-    origen_reparacion, producto_id, unidad_imei_id,
+    cliente_id, sucursal_id, telefono, telefono_adicional, equipo_marca, equipo_modelo, imei_equipo, equipo_contrasena, problema_reportado, prioridad,
+    equipo_enciende, origen_reparacion, producto_id, unidad_imei_id,
   } = req.body ?? {};
 
   const esCompraPropia = origen_reparacion === 'compra_propia';
@@ -180,6 +182,11 @@ router.post('/', requireRole('admin', 'vendedor', 'tecnico'), async (req, res) =
     if (!telefono?.trim()) return res.status(400).json({ error: 'El teléfono de contacto es requerido.' });
   }
   if (!problema_reportado?.trim()) return res.status(400).json({ error: 'Describe el problema reportado.' });
+  // Opcional a nivel de API (un cliente de la app anterior a este campo no lo
+  // manda); la app nueva lo pide como obligatorio en la recepcion.
+  if (equipo_enciende !== undefined && equipo_enciende !== null && typeof equipo_enciende !== 'boolean') {
+    return res.status(400).json({ error: 'equipo_enciende debe ser verdadero o falso.' });
+  }
   const prioridadFinal = PRIORIDADES_VALIDAS.includes(prioridad) ? prioridad : 'media';
 
   const client = await pool.connect();
@@ -193,16 +200,23 @@ router.post('/', requireRole('admin', 'vendedor', 'tecnico'), async (req, res) =
       // modulos, como ventas, lo siguen dejando opcional). Solo escribe si
       // cambio, para no generar updates de a gratis en el caso comun.
       await client.query(`UPDATE clientes SET telefono = $1 WHERE id = $2 AND telefono IS DISTINCT FROM $1`, [telefono.trim(), cliente_id]);
+      // Igual con el telefono adicional, pero solo si la app lo mando (undefined
+      // = no tocar; null o vacio = el cliente ya no tiene uno).
+      if (telefono_adicional !== undefined) {
+        const adicional = typeof telefono_adicional === 'string' ? telefono_adicional.trim() || null : null;
+        await client.query(`UPDATE clientes SET telefono_adicional = $1 WHERE id = $2 AND telefono_adicional IS DISTINCT FROM $1`, [adicional, cliente_id]);
+      }
     }
 
     const reparacion = await client.query(
-      `INSERT INTO reparaciones (cliente_id, sucursal_id, equipo_marca, equipo_modelo, imei_equipo, equipo_contrasena, problema_reportado, prioridad, origen_reparacion, producto_id, unidad_imei_id)
-       VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11)
+      `INSERT INTO reparaciones (cliente_id, sucursal_id, equipo_marca, equipo_modelo, imei_equipo, equipo_contrasena, problema_reportado, prioridad, origen_reparacion, producto_id, unidad_imei_id, equipo_enciende)
+       VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12)
        RETURNING id, folio, estado, created_at`,
       [
         esCompraPropia ? null : cliente_id, sucursal_id, equipo_marca || null, equipo_modelo || null, imei_equipo || null,
         equipo_contrasena || null, problema_reportado.trim(), prioridadFinal,
         esCompraPropia ? 'compra_propia' : 'cliente', producto_id || null, unidad_imei_id || null,
+        typeof equipo_enciende === 'boolean' ? equipo_enciende : null,
       ]
     );
 
@@ -244,6 +258,9 @@ router.patch('/:id', async (req, res) => {
   if (req.body?.checklist_revision !== undefined && req.body.checklist_revision !== null && typeof req.body.checklist_revision !== 'object') {
     return res.status(400).json({ error: 'checklist_revision debe ser un objeto.' });
   }
+  if (req.body?.equipo_enciende !== undefined && req.body.equipo_enciende !== null && typeof req.body.equipo_enciende !== 'boolean') {
+    return res.status(400).json({ error: 'equipo_enciende debe ser verdadero o falso.' });
+  }
 
   const nuevoEstado = req.body?.estado ?? actual.estado;
   const costoManoObra = req.body?.costo_mano_obra !== undefined ? Number(req.body.costo_mano_obra) : Number(actual.costo_mano_obra);
@@ -266,6 +283,7 @@ router.patch('/:id', async (req, res) => {
     fecha_estimada_entrega: req.body?.fecha_estimada_entrega,
     nota_para_cliente: req.body?.nota_para_cliente,
     checklist_revision: req.body?.checklist_revision,
+    equipo_enciende: req.body?.equipo_enciende,
   };
   const sets = [];
   const values = [];
@@ -288,7 +306,7 @@ router.patch('/:id', async (req, res) => {
       `UPDATE reparaciones SET ${sets.join(', ')} WHERE id = $${i}
        RETURNING id, folio, cliente_id, sucursal_id, equipo_marca, equipo_modelo, imei_equipo, problema_reportado,
                  diagnostico, estado, prioridad, tecnico_id, costo_mano_obra, costo_refacciones, total, monto_pagado, garantia_dias,
-                 fecha_estimada_entrega, nota_para_cliente, checklist_revision, origen_reparacion, producto_id, unidad_imei_id, created_at, updated_at`,
+                 fecha_estimada_entrega, nota_para_cliente, checklist_revision, equipo_enciende, origen_reparacion, producto_id, unidad_imei_id, created_at, updated_at`,
       values
     );
 
@@ -365,7 +383,7 @@ router.post('/:id/refacciones', requireRole('admin', 'tecnico'), async (req, res
   if (!producto_id && !refaccion_id) return res.status(400).json({ error: 'producto_id o refaccion_id es requerido.' });
   const cant = Number(cantidad) || 1;
 
-  const reparacionResult = await pool.query(`SELECT sucursal_id FROM reparaciones WHERE id = $1`, [req.params.id]);
+  const reparacionResult = await pool.query(`SELECT sucursal_id, folio FROM reparaciones WHERE id = $1`, [req.params.id]);
   const reparacion = reparacionResult.rows[0];
   if (!reparacion) return res.status(404).json({ error: 'Reparación no encontrada.' });
 
@@ -377,13 +395,17 @@ router.post('/:id/refacciones', requireRole('admin', 'tecnico'), async (req, res
     if (refaccion_id) {
       // Inventario dedicado de refacciones -- no pasa por inventario/
       // movimientos_inventario, esas tablas son solo de productos.
-      const stockResult = await client.query(`SELECT stock, nombre, costo FROM refacciones WHERE id = $1 FOR UPDATE`, [refaccion_id]);
+      const stockResult = await client.query(`SELECT stock, nombre, costo, sucursal_id FROM refacciones WHERE id = $1 FOR UPDATE`, [refaccion_id]);
       const stockRow = stockResult.rows[0];
       if (!stockRow || stockRow.stock < cant) {
         throw Object.assign(new Error(`Stock insuficiente para "${stockRow?.nombre ?? refaccion_id}".`), { statusCode: 409 });
       }
       costoFinal = costo !== undefined ? Number(costo) : cant * Number(stockRow.costo);
       await client.query(`UPDATE refacciones SET stock = stock - $1 WHERE id = $2`, [cant, refaccion_id]);
+      await registrarMovimientoRefaccion(client, {
+        refaccionId: refaccion_id, sucursalId: stockRow.sucursal_id, tipo: 'salida', cantidad: cant,
+        motivo: `Usada en reparación ${reparacion.folio}`, usuarioId: req.usuario.sub,
+      });
     } else {
       const stockResult = await client.query(
         `SELECT stock_cantidad, p.nombre, p.precio_venta

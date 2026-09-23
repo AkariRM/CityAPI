@@ -1,5 +1,6 @@
 const express = require('express');
 const PDFDocument = require('pdfkit');
+const { pool } = require('../db');
 const { requireAuth, requireRole } = require('../middleware/auth');
 const { calcularResumenFinanciero } = require('../utils/resumenFinanciero');
 
@@ -15,17 +16,26 @@ function escaparXml(texto) {
 }
 
 router.get('/financiero', async (req, res) => {
-  const { desde, hasta, formato } = req.query;
+  const { desde, hasta, formato, sucursal_id } = req.query;
   if (!desde || !hasta) return res.status(400).json({ error: 'desde y hasta son requeridos (YYYY-MM-DD).' });
 
-  const resumen = await calcularResumenFinanciero(desde, hasta);
+  const resumen = await calcularResumenFinanciero(desde, hasta, sucursal_id || null);
+
+  // Un reporte de una sola sucursal tiene que decirlo, o al abrir el PDF/XML
+  // parece el del negocio completo.
+  let sucursalNombre = 'Todas las sucursales';
+  if (sucursal_id) {
+    const { rows } = await pool.query(`SELECT nombre FROM sucursales WHERE id = $1`, [sucursal_id]);
+    sucursalNombre = rows[0]?.nombre ?? 'Sucursal';
+  }
 
   if (formato === 'xml') {
     const xml = `<?xml version="1.0" encoding="UTF-8"?>
 <reporteFinanciero>
-  <periodo desde="${escaparXml(resumen.desde)}" hasta="${escaparXml(resumen.hasta)}"/>
+  <periodo desde="${escaparXml(resumen.desde)}" hasta="${escaparXml(resumen.hasta)}" sucursal="${escaparXml(sucursalNombre)}"/>
   <numeroVentas>${resumen.numero_ventas}</numeroVentas>
   <ingresos>${resumen.ingresos.toFixed(2)}</ingresos>
+  <ingresosReparaciones>${resumen.ingresos_reparaciones.toFixed(2)}</ingresosReparaciones>
   <costoVentas>${resumen.costo_ventas.toFixed(2)}</costoVentas>
   <utilidadBruta>${resumen.utilidad_bruta.toFixed(2)}</utilidadBruta>
   <gastos>${resumen.gastos.toFixed(2)}</gastos>
@@ -47,7 +57,7 @@ router.get('/financiero', async (req, res) => {
   doc.fontSize(20).text('CityPhone SGI', { align: 'center' });
   doc.fontSize(14).text('Reporte financiero', { align: 'center' });
   doc.moveDown(0.3);
-  doc.fontSize(10).fillColor('#666666').text(`Periodo: ${desde} a ${hasta}`, { align: 'center' });
+  doc.fontSize(10).fillColor('#666666').text(`Periodo: ${desde} a ${hasta} · ${sucursalNombre}`, { align: 'center' });
   doc.fillColor('#000000').moveDown(2);
 
   doc.fontSize(12).text(`Ventas completadas: ${resumen.numero_ventas}`);
@@ -58,7 +68,8 @@ router.get('/financiero', async (req, res) => {
     doc.moveDown(0.3);
   }
 
-  fila('Ingresos', resumen.ingresos);
+  fila('Ingresos por ventas', resumen.ingresos);
+  fila('Ingresos por reparaciones (cobrado)', resumen.ingresos_reparaciones);
   fila('Costo de ventas', resumen.costo_ventas);
   fila('Utilidad bruta', resumen.utilidad_bruta);
   fila('Gastos', resumen.gastos);

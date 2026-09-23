@@ -151,6 +151,8 @@ CREATE TABLE clientes (
   id          uuid PRIMARY KEY DEFAULT gen_random_uuid(),
   nombre      text NOT NULL,
   telefono    text,
+  -- Segundo numero de contacto (ver migracion_equipo_enciende_telefono_adicional.sql).
+  telefono_adicional text,
   email       text,
   direccion   text,
   notas       text,
@@ -527,6 +529,9 @@ CREATE TABLE reparaciones (
   -- poder evolucionar la lista de puntos sin migraciones futuras. Ver
   -- ChecklistRevisionEquipo.jsx para la forma exacta del objeto.
   checklist_revision jsonb,
+  -- Respuesta Si/No de "el equipo enciende" al recibirlo. Null en folios
+  -- anteriores a este campo y en equipos propios. Solo visible en la app.
+  equipo_enciende    boolean,
   -- producto_id/unidad_imei_id solo se usan cuando origen_reparacion es
   -- 'compra_propia' (equipo del propio inventario mandado a revision antes
   -- de publicarse en catalogo, ver EquipoFormModal) -- para una reparacion
@@ -563,7 +568,8 @@ CREATE TABLE refacciones (
 );
 CREATE INDEX idx_refacciones_sucursal ON refacciones(sucursal_id);
 
--- Ajustes manuales de stock de refacciones (Stock/Kardex) -- ver
+-- Bitacora de movimientos de refacciones (stock inicial, compras, uso en
+-- reparaciones, sobrantes y ajustes manuales) -- ver
 -- migracion_movimientos_refacciones.sql.
 CREATE TABLE movimientos_refacciones (
   id            uuid PRIMARY KEY DEFAULT gen_random_uuid(),

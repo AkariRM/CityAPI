@@ -2,6 +2,7 @@ const express = require('express');
 const { pool } = require('../db');
 const { requireAuth, requireRole } = require('../middleware/auth');
 const { obtenerConfiguracionTicket } = require('../utils/configuracionTicket');
+const { registrarMovimientoRefaccion } = require('../utils/movimientosRefacciones');
 
 const router = express.Router();
 
@@ -18,7 +19,7 @@ router.get('/', async (req, res) => {
   if (estado !== undefined && !ESTADOS_VALIDOS.includes(estado)) return res.status(400).json({ error: 'Estado inválido.' });
 
   const { rows } = await pool.query(
-    `SELECT sp.id, sp.reparacion_id, r.folio, sp.producto_id, sp.refaccion_id, COALESCE(p.nombre, ref.nombre, sp.nombre_libre) AS producto_nombre, sp.nombre_libre, sp.descripcion_libre,
+    `SELECT sp.id, sp.reparacion_id, r.folio, r.sucursal_id, sp.producto_id, sp.refaccion_id, COALESCE(p.nombre, ref.nombre, sp.nombre_libre) AS producto_nombre, sp.nombre_libre, sp.descripcion_libre,
             sp.costo_estimado, sp.estado, sp.motivo_rechazo,
             sp.solicitado_por, us.nombre AS solicitado_por_nombre,
             sp.aprobado_por, ua.nombre AS aprobado_por_nombre,
@@ -183,10 +184,14 @@ router.post('/:id/recibir', requireRole('admin', 'tecnico'), async (req, res) =>
     }
 
     if (refaccionId && cantidadComprada > 1) {
-      await client.query(
-        `UPDATE refacciones SET stock = stock + $1, costo = $2 WHERE id = $3`,
+      const sobrante = await client.query(
+        `UPDATE refacciones SET stock = stock + $1, costo = $2 WHERE id = $3 RETURNING sucursal_id`,
         [cantidadComprada - 1, solicitud.costo_estimado, refaccionId]
       );
+      await registrarMovimientoRefaccion(client, {
+        refaccionId, sucursalId: sobrante.rows[0].sucursal_id, tipo: 'entrada', cantidad: cantidadComprada - 1,
+        motivo: `Sobrante de pieza solicitada (folio ${solicitud.folio})`, usuarioId: req.usuario.sub,
+      });
     }
 
     if (registrar_gasto) {

@@ -43,6 +43,17 @@ async function calcularResumen(sucursal_id, usuario_id) {
     [usuario_id, desde]
   );
 
+  // Lo cobrado en reparaciones (anticipos y pagos del folio) tambien entra a
+  // la caja de quien lo cobra, igual que los abonos de arriba.
+  const abonosReparacionPorMetodo = await pool.query(
+    `SELECT metodo, count(*)::int AS cantidad, COALESCE(sum(monto), 0) AS total
+     FROM reparacion_abonos
+     WHERE usuario_id = $1
+       AND created_at > COALESCE($2::timestamptz, date_trunc('day', now()))
+     GROUP BY metodo`,
+    [usuario_id, desde]
+  );
+
   // Salidas de caja del turno (gasto o retiro) — ambas restan del efectivo
   // fisico esperado, aunque solo 'gasto' cuenta como costo del negocio en
   // Finanzas (ver resumenFinanciero.js). 'usuario_id' aqui es quien registro
@@ -69,6 +80,10 @@ async function calcularResumen(sucursal_id, usuario_id) {
     cantidadAbonos += row.cantidad;
   }
   for (const row of abonosApartadoPorMetodo.rows) {
+    totales[row.metodo] += Number(row.total);
+    cantidadAbonos += row.cantidad;
+  }
+  for (const row of abonosReparacionPorMetodo.rows) {
     totales[row.metodo] += Number(row.total);
     cantidadAbonos += row.cantidad;
   }

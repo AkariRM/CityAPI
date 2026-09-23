@@ -11,6 +11,15 @@ const MAX_INTENTOS = 5;
 const BLOQUEO_MS = 15 * 60 * 1000;
 
 const ROLES_VALIDOS = ['dueño', 'admin', 'vendedor', 'tecnico', 'community_manager', 'pto'];
+const UUID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
+
+// Un equipo con sucursal fija (Configuracion) solo deja entrar a usuarios de
+// esa sucursal. Quedan fuera de la regla el 'dueño' (opera todo) y quien no
+// esta ligado a ninguna sucursal (sucursal_id NULL: community manager,
+// usuarios de Aurea).
+function puedeEntrarEnSucursal(usuario, sucursalDispositivo) {
+  return usuario.rol === 'dueño' || !usuario.sucursal_id || usuario.sucursal_id === sucursalDispositivo;
+}
 
 // Ademas del bloqueo por cuenta (abajo), esto limita cuantos intentos de
 // login puede hacer una misma IP en total — evita que alguien pruebe PINs
@@ -28,12 +37,16 @@ const loginLimiter = rateLimit({
 // en la misma lista — 'dueño' aparece en ambas sin importar el filtro,
 // porque puede operar cualquiera de las dos.
 router.get('/usuarios', async (req, res) => {
-  const { rol, empresa } = req.query;
+  const { rol, empresa, sucursal_id } = req.query;
   if (!rol || !ROLES_VALIDOS.includes(rol)) {
     return res.status(400).json({ error: 'rol inválido o faltante.' });
   }
   if (!empresa) {
     return res.status(400).json({ error: 'empresa es requerida.' });
+  }
+  // sucursal_id (opcional) = la sucursal fija del equipo que pide la lista.
+  if (sucursal_id !== undefined && !UUID_RE.test(sucursal_id)) {
+    return res.status(400).json({ error: 'sucursal_id inválido.' });
   }
 
   const { rows } = await pool.query(
@@ -42,16 +55,20 @@ router.get('/usuarios', async (req, res) => {
      LEFT JOIN sucursales s ON s.id = u.sucursal_id
      LEFT JOIN empresas e ON e.id = u.empresa_id
      WHERE u.rol = $1 AND u.activo = true AND (e.slug = $2 OR u.rol = 'dueño')
+       AND ($3::uuid IS NULL OR u.rol = 'dueño' OR u.sucursal_id IS NULL OR u.sucursal_id = $3::uuid)
      ORDER BY u.nombre`,
-    [rol, empresa]
+    [rol, empresa, sucursal_id || null]
   );
   res.json(rows);
 });
 
 router.post('/login', loginLimiter, async (req, res) => {
-  const { usuario_id, pin } = req.body ?? {};
+  const { usuario_id, pin, sucursal_dispositivo } = req.body ?? {};
   if (!usuario_id || !pin) {
     return res.status(400).json({ error: 'usuario_id y pin son requeridos.' });
+  }
+  if (sucursal_dispositivo !== undefined && sucursal_dispositivo !== null && !UUID_RE.test(sucursal_dispositivo)) {
+    return res.status(400).json({ error: 'sucursal_dispositivo inválido.' });
   }
 
   const { rows } = await pool.query(
@@ -67,6 +84,11 @@ router.post('/login', loginLimiter, async (req, res) => {
   );
   const usuario = rows[0];
   if (!usuario) return res.status(404).json({ error: 'Usuario no encontrado.' });
+
+  // Antes del PIN, para que no cuente como intento fallido ni deje probar PINs.
+  if (sucursal_dispositivo && !puedeEntrarEnSucursal(usuario, sucursal_dispositivo)) {
+    return res.status(403).json({ error: 'Este usuario es de otra sucursal y no puede iniciar sesión en este equipo.' });
+  }
 
   if (usuario.bloqueado_hasta && new Date(usuario.bloqueado_hasta) > new Date()) {
     const segundos = Math.ceil((new Date(usuario.bloqueado_hasta) - new Date()) / 1000);

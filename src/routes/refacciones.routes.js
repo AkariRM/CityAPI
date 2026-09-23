@@ -2,6 +2,7 @@ const express = require('express');
 const { pool } = require('../db');
 const { requireAuth, requireRole, esAdminODueno } = require('../middleware/auth');
 const { inicioDiaUTC, finDiaUTCExclusivo } = require('../utils/fechas');
+const { registrarMovimientoRefaccion } = require('../utils/movimientosRefacciones');
 
 const router = express.Router();
 
@@ -30,13 +31,29 @@ router.post('/', requireRole('admin'), async (req, res) => {
   if (!sucursal_id) return res.status(400).json({ error: 'sucursal_id es requerido.' });
   if (!nombre?.trim()) return res.status(400).json({ error: 'El nombre es requerido.' });
 
-  const { rows } = await pool.query(
-    `INSERT INTO refacciones (sucursal_id, nombre, categoria, proveedor, costo, stock, stock_minimo)
-     VALUES ($1, $2, $3, $4, $5, $6, $7)
-     RETURNING id, sucursal_id, nombre, categoria, proveedor, costo, stock, stock_minimo, activo, created_at, updated_at`,
-    [sucursal_id, nombre.trim(), categoria?.trim() || null, proveedor?.trim() || null, Number(costo) || 0, Number(stock) || 0, Number(stock_minimo) || 0]
-  );
-  res.status(201).json(rows[0]);
+  const client = await pool.connect();
+  try {
+    await client.query('BEGIN');
+    const { rows } = await client.query(
+      `INSERT INTO refacciones (sucursal_id, nombre, categoria, proveedor, costo, stock, stock_minimo)
+       VALUES ($1, $2, $3, $4, $5, $6, $7)
+       RETURNING id, sucursal_id, nombre, categoria, proveedor, costo, stock, stock_minimo, activo, created_at, updated_at`,
+      [sucursal_id, nombre.trim(), categoria?.trim() || null, proveedor?.trim() || null, Number(costo) || 0, Number(stock) || 0, Number(stock_minimo) || 0]
+    );
+    if (rows[0].stock > 0) {
+      await registrarMovimientoRefaccion(client, {
+        refaccionId: rows[0].id, sucursalId: rows[0].sucursal_id, tipo: 'entrada', cantidad: rows[0].stock, motivo: 'Stock inicial', usuarioId: req.usuario.sub,
+      });
+    }
+    await client.query('COMMIT');
+    res.status(201).json(rows[0]);
+  } catch (err) {
+    await client.query('ROLLBACK');
+    console.error(err);
+    res.status(500).json({ error: 'Error interno del servidor.' });
+  } finally {
+    client.release();
+  }
 });
 
 router.patch('/:id', requireRole('admin'), async (req, res) => {
@@ -84,6 +101,10 @@ router.post('/:id/compra', requireRole('admin'), async (req, res) => {
       [cant, costo, req.params.id]
     );
 
+    await registrarMovimientoRefaccion(client, {
+      refaccionId: req.params.id, sucursalId: refaccion.sucursal_id, tipo: 'entrada', cantidad: cant, motivo: 'Compra de refacción', usuarioId: req.usuario.sub,
+    });
+
     if (registrar_gasto) {
       await client.query(
         `INSERT INTO gastos (sucursal_id, usuario_id, tipo, categoria, monto, descripcion, fecha)
@@ -124,11 +145,14 @@ router.post('/:id/ajuste-stock', requireRole('admin'), async (req, res) => {
 
     const { rows } = await client.query(`UPDATE refacciones SET stock = stock + $1 WHERE id = $2 RETURNING stock`, [delta, req.params.id]);
 
-    await client.query(
-      `INSERT INTO movimientos_refacciones (refaccion_id, sucursal_id, tipo, cantidad, motivo, usuario_id)
-       VALUES ($1, $2, $3, $4, $5, $6)`,
-      [req.params.id, refaccion.sucursal_id, tipo || (delta > 0 ? 'entrada' : 'salida'), Math.abs(delta), motivo || 'Ajuste manual de inventario', req.usuario.sub]
-    );
+    await registrarMovimientoRefaccion(client, {
+      refaccionId: req.params.id,
+      sucursalId: refaccion.sucursal_id,
+      tipo: tipo || (delta > 0 ? 'entrada' : 'salida'),
+      cantidad: delta,
+      motivo: motivo || 'Ajuste manual de inventario',
+      usuarioId: req.usuario.sub,
+    });
 
     await client.query('COMMIT');
     res.json({ stock: rows[0].stock });
