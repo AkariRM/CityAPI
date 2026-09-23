@@ -18,7 +18,7 @@ router.get('/', async (req, res) => {
   if (estado !== undefined && !ESTADOS_VALIDOS.includes(estado)) return res.status(400).json({ error: 'Estado inválido.' });
 
   const { rows } = await pool.query(
-    `SELECT sp.id, sp.reparacion_id, r.folio, sp.producto_id, sp.refaccion_id, COALESCE(p.nombre, ref.nombre) AS producto_nombre, sp.descripcion_libre,
+    `SELECT sp.id, sp.reparacion_id, r.folio, sp.producto_id, sp.refaccion_id, COALESCE(p.nombre, ref.nombre, sp.nombre_libre) AS producto_nombre, sp.nombre_libre, sp.descripcion_libre,
             sp.costo_estimado, sp.estado, sp.motivo_rechazo,
             sp.solicitado_por, us.nombre AS solicitado_por_nombre,
             sp.aprobado_por, ua.nombre AS aprobado_por_nombre,
@@ -38,10 +38,10 @@ router.get('/', async (req, res) => {
 });
 
 router.post('/', requireRole('admin', 'tecnico'), async (req, res) => {
-  const { reparacion_id, producto_id, refaccion_id, descripcion_libre, costo_estimado } = req.body ?? {};
+  const { reparacion_id, producto_id, refaccion_id, nombre_libre, descripcion_libre, costo_estimado } = req.body ?? {};
   if (!reparacion_id) return res.status(400).json({ error: 'reparacion_id es requerido.' });
-  if (!producto_id && !refaccion_id && !descripcion_libre?.trim()) {
-    return res.status(400).json({ error: 'Elige un producto/refacción del catálogo o describe la pieza.' });
+  if (!producto_id && !refaccion_id && !nombre_libre?.trim()) {
+    return res.status(400).json({ error: 'Escribe el nombre de la pieza.' });
   }
   if (!(Number(costo_estimado) >= 0)) return res.status(400).json({ error: 'costo_estimado debe ser un número mayor o igual a 0.' });
 
@@ -49,10 +49,10 @@ router.post('/', requireRole('admin', 'tecnico'), async (req, res) => {
   if (!reparacion.rows[0]) return res.status(404).json({ error: 'Reparación no encontrada.' });
 
   const { rows } = await pool.query(
-    `INSERT INTO reparacion_solicitudes_pieza (reparacion_id, producto_id, refaccion_id, descripcion_libre, costo_estimado, solicitado_por)
-     VALUES ($1, $2, $3, $4, $5, $6)
-     RETURNING id, reparacion_id, producto_id, refaccion_id, descripcion_libre, costo_estimado, estado, created_at`,
-    [reparacion_id, producto_id || null, refaccion_id || null, descripcion_libre?.trim() || null, Number(costo_estimado) || 0, req.usuario.sub]
+    `INSERT INTO reparacion_solicitudes_pieza (reparacion_id, producto_id, refaccion_id, nombre_libre, descripcion_libre, costo_estimado, solicitado_por)
+     VALUES ($1, $2, $3, $4, $5, $6, $7)
+     RETURNING id, reparacion_id, producto_id, refaccion_id, nombre_libre, descripcion_libre, costo_estimado, estado, created_at`,
+    [reparacion_id, producto_id || null, refaccion_id || null, nombre_libre?.trim() || null, descripcion_libre?.trim() || null, Number(costo_estimado) || 0, req.usuario.sub]
   );
   res.status(201).json(rows[0]);
 });
@@ -107,8 +107,19 @@ router.patch('/:id/rechazar', requireRole('admin'), async (req, res) => {
 // pieza se consiguio por fuera) y recalcula el total de la reparacion,
 // igual que POST /reparaciones/:id/refacciones. registrar_gasto (opcional)
 // ademas la refleja en Gastos del local, igual que la compra de refacciones.
+//
+// cantidad_comprada (opcional, >=1, solo aplica si hay/quedara un
+// refaccion_id vinculado): si se compraron mas piezas de las que se usan
+// aqui (siempre 1), el excedente entra como stock real a esa refaccion --
+// mismo mecanismo que POST /refacciones/:id/compra.
+//
+// crear_refaccion (opcional, {nombre, categoria, proveedor}): cuando la
+// solicitud no tenia producto_id ni refaccion_id (se pidio solo con
+// nombre_libre), esto la da de alta como refaccion real del catalogo antes
+// de vincularla, para que la proxima vez ya se pueda buscar en vez de
+// volver a describirla.
 router.post('/:id/recibir', requireRole('admin', 'tecnico'), async (req, res) => {
-  const { registrar_gasto } = req.body ?? {};
+  const { registrar_gasto, cantidad_comprada, crear_refaccion } = req.body ?? {};
   const actual = await pool.query(
     `SELECT sp.*, r.folio, r.sucursal_id
      FROM reparacion_solicitudes_pieza sp
@@ -120,17 +131,44 @@ router.post('/:id/recibir', requireRole('admin', 'tecnico'), async (req, res) =>
   if (!solicitud) return res.status(404).json({ error: 'Solicitud no encontrada.' });
   if (solicitud.estado !== 'aprobada') return res.status(409).json({ error: 'Solo se puede recibir una solicitud aprobada.' });
 
+  let cantidadComprada = null;
+  if (cantidad_comprada !== undefined && cantidad_comprada !== null) {
+    if (!(Number.isInteger(Number(cantidad_comprada)) && Number(cantidad_comprada) >= 1)) {
+      return res.status(400).json({ error: 'cantidad_comprada debe ser un entero mayor o igual a 1.' });
+    }
+    cantidadComprada = Number(cantidad_comprada);
+  }
+  if (crear_refaccion) {
+    if (!crear_refaccion.nombre?.trim()) return res.status(400).json({ error: 'El nombre de la nueva refacción es requerido.' });
+    if (solicitud.producto_id || solicitud.refaccion_id) {
+      return res.status(400).json({ error: 'Esta pieza ya está vinculada a un producto/refacción — no se puede crear otra.' });
+    }
+  }
+
   const client = await pool.connect();
   try {
     await client.query('BEGIN');
 
+    let refaccionId = solicitud.refaccion_id;
+    let refaccionRecienCreada = false;
+    if (crear_refaccion) {
+      const nueva = await client.query(
+        `INSERT INTO refacciones (sucursal_id, nombre, categoria, proveedor, costo, stock)
+         VALUES ($1, $2, $3, $4, $5, 0)
+         RETURNING id`,
+        [solicitud.sucursal_id, crear_refaccion.nombre.trim(), crear_refaccion.categoria?.trim() || null, crear_refaccion.proveedor?.trim() || null, solicitud.costo_estimado]
+      );
+      refaccionId = nueva.rows[0].id;
+      refaccionRecienCreada = true;
+    }
+
     let reparacionRefaccionId = null;
-    if (solicitud.producto_id || solicitud.refaccion_id) {
+    if (solicitud.producto_id || refaccionId) {
       const refaccion = await client.query(
         `INSERT INTO reparacion_refacciones (reparacion_id, producto_id, refaccion_id, cantidad, costo)
          VALUES ($1, $2, $3, 1, $4)
          RETURNING id`,
-        [solicitud.reparacion_id, solicitud.producto_id, solicitud.refaccion_id, solicitud.costo_estimado]
+        [solicitud.reparacion_id, solicitud.producto_id, refaccionId, solicitud.costo_estimado]
       );
       reparacionRefaccionId = refaccion.rows[0].id;
 
@@ -144,18 +182,34 @@ router.post('/:id/recibir', requireRole('admin', 'tecnico'), async (req, res) =>
       );
     }
 
+    if (refaccionId && cantidadComprada > 1) {
+      await client.query(
+        `UPDATE refacciones SET stock = stock + $1, costo = $2 WHERE id = $3`,
+        [cantidadComprada - 1, solicitud.costo_estimado, refaccionId]
+      );
+    }
+
     if (registrar_gasto) {
+      const piezaLabel = solicitud.nombre_libre ?? solicitud.descripcion_libre ?? '';
+      const cant = cantidadComprada ?? 1;
       await client.query(
         `INSERT INTO gastos (sucursal_id, usuario_id, tipo, categoria, monto, descripcion, fecha)
          VALUES ($1, $2, 'gasto', 'Piezas de reparación', $3, $4, current_date)`,
-        [solicitud.sucursal_id, req.usuario.sub, solicitud.costo_estimado, `Pieza de reparación folio ${solicitud.folio}: ${solicitud.descripcion_libre ?? ''}`.trim()]
+        [
+          solicitud.sucursal_id,
+          req.usuario.sub,
+          Number(solicitud.costo_estimado) * cant,
+          `Pieza de reparación folio ${solicitud.folio}: ${piezaLabel}${cant > 1 ? ` x${cant}` : ''}`.trim(),
+        ]
       );
     }
 
     const { rows } = await client.query(
-      `UPDATE reparacion_solicitudes_pieza SET estado = 'recibida', reparacion_refaccion_id = $1 WHERE id = $2
-       RETURNING id, reparacion_id, producto_id, refaccion_id, descripcion_libre, costo_estimado, estado, reparacion_refaccion_id`,
-      [reparacionRefaccionId, req.params.id]
+      `UPDATE reparacion_solicitudes_pieza
+       SET estado = 'recibida', reparacion_refaccion_id = $1, refaccion_id = COALESCE($2, refaccion_id)
+       WHERE id = $3
+       RETURNING id, reparacion_id, producto_id, refaccion_id, nombre_libre, descripcion_libre, costo_estimado, estado, reparacion_refaccion_id`,
+      [reparacionRefaccionId, refaccionRecienCreada ? refaccionId : null, req.params.id]
     );
 
     await client.query('COMMIT');

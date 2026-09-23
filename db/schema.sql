@@ -589,6 +589,7 @@ CREATE TABLE reparacion_solicitudes_pieza (
   reparacion_id            uuid NOT NULL REFERENCES reparaciones(id) ON DELETE CASCADE,
   producto_id              uuid REFERENCES productos(id),
   refaccion_id             uuid REFERENCES refacciones(id),
+  nombre_libre             text,
   descripcion_libre        text,
   costo_estimado           numeric(12,2) NOT NULL DEFAULT 0,
   estado                   estado_solicitud_pieza NOT NULL DEFAULT 'pendiente',
@@ -598,7 +599,7 @@ CREATE TABLE reparacion_solicitudes_pieza (
   reparacion_refaccion_id  uuid REFERENCES reparacion_refacciones(id),
   created_at               timestamptz NOT NULL DEFAULT now(),
   updated_at               timestamptz NOT NULL DEFAULT now(),
-  CONSTRAINT chk_solicitud_pieza_identificada CHECK (producto_id IS NOT NULL OR refaccion_id IS NOT NULL OR descripcion_libre IS NOT NULL)
+  CONSTRAINT chk_solicitud_pieza_identificada CHECK (producto_id IS NOT NULL OR refaccion_id IS NOT NULL OR nombre_libre IS NOT NULL OR descripcion_libre IS NOT NULL)
 );
 CREATE INDEX idx_solicitudes_pieza_reparacion ON reparacion_solicitudes_pieza(reparacion_id);
 CREATE INDEX idx_solicitudes_pieza_estado ON reparacion_solicitudes_pieza(estado);
