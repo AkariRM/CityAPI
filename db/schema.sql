@@ -398,7 +398,7 @@ CREATE TABLE cambios_equipo (
   sucursal_id       uuid NOT NULL REFERENCES sucursales(id),
   cliente_id        uuid REFERENCES clientes(id),
   cliente_nombre    text NOT NULL,
-  cliente_telefono  text NOT NULL,
+  cliente_telefono  text,
   equipo_modelo     text NOT NULL,
   grado             grado_cambio_equipo NOT NULL,
   grado_detalle     text,

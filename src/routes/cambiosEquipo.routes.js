@@ -45,7 +45,6 @@ router.post('/', async (req, res) => {
 
   if (!sucursal_id) return res.status(400).json({ error: 'sucursal_id es requerido.' });
   if (!cliente_nombre?.trim()) return res.status(400).json({ error: 'El nombre del cliente es requerido.' });
-  if (!cliente_telefono?.trim()) return res.status(400).json({ error: 'El teléfono del cliente es requerido.' });
   if (!equipo_modelo?.trim()) return res.status(400).json({ error: 'El equipo ofrecido es requerido.' });
   if (!GRADOS_VALIDOS.includes(grado)) return res.status(400).json({ error: 'Grado inválido.' });
   if (grado === 'otro' && !grado_detalle?.trim()) {
@@ -63,10 +62,10 @@ router.post('/', async (req, res) => {
       sucursal_id,
       cliente_id || null,
       cliente_nombre.trim(),
-      cliente_telefono.trim(),
+      cliente_telefono?.trim() || null,
       equipo_modelo.trim(),
       grado,
-      grado === 'otro' ? grado_detalle.trim() : null,
+      grado_detalle?.trim() || null,
       bateria_pct ?? null,
       pantalla_ok ?? true,
       cuerpo_ok ?? true,
