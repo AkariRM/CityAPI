@@ -1,6 +1,7 @@
 const express = require('express');
 const { pool } = require('../db');
 const { requireAuth, requireRole, esAdminODueno } = require('../middleware/auth');
+const { inicioDiaUTC, finDiaUTCExclusivo } = require('../utils/fechas');
 
 const router = express.Router();
 
@@ -101,6 +102,64 @@ router.post('/:id/compra', requireRole('admin'), async (req, res) => {
   } finally {
     client.release();
   }
+});
+
+// Ajuste manual de stock (Stock/Kardex -> Nuevo movimiento). Misma idea que
+// POST /productos/:id/ajuste-stock: cantidad es el delta con signo. La
+// sucursal es la de la propia refaccion (cada fila ya pertenece a una).
+router.post('/:id/ajuste-stock', requireRole('admin'), async (req, res) => {
+  const { cantidad, motivo, tipo } = req.body ?? {};
+  const delta = Number(cantidad);
+  if (!Number.isInteger(delta) || delta === 0) return res.status(400).json({ error: 'cantidad debe ser un entero distinto de 0.' });
+  if (tipo !== undefined && !['entrada', 'salida', 'ajuste'].includes(tipo)) return res.status(400).json({ error: 'tipo inválido.' });
+
+  const client = await pool.connect();
+  try {
+    await client.query('BEGIN');
+
+    const actual = await client.query(`SELECT sucursal_id, stock FROM refacciones WHERE id = $1 FOR UPDATE`, [req.params.id]);
+    const refaccion = actual.rows[0];
+    if (!refaccion) throw Object.assign(new Error('Refacción no encontrada.'), { statusCode: 404 });
+    if (refaccion.stock + delta < 0) throw Object.assign(new Error('No hay stock suficiente para ese ajuste.'), { statusCode: 409 });
+
+    const { rows } = await client.query(`UPDATE refacciones SET stock = stock + $1 WHERE id = $2 RETURNING stock`, [delta, req.params.id]);
+
+    await client.query(
+      `INSERT INTO movimientos_refacciones (refaccion_id, sucursal_id, tipo, cantidad, motivo, usuario_id)
+       VALUES ($1, $2, $3, $4, $5, $6)`,
+      [req.params.id, refaccion.sucursal_id, tipo || (delta > 0 ? 'entrada' : 'salida'), Math.abs(delta), motivo || 'Ajuste manual de inventario', req.usuario.sub]
+    );
+
+    await client.query('COMMIT');
+    res.json({ stock: rows[0].stock });
+  } catch (err) {
+    await client.query('ROLLBACK');
+    if (err.statusCode) return res.status(err.statusCode).json({ error: err.message });
+    console.error(err);
+    res.status(500).json({ error: 'Error interno del servidor.' });
+  } finally {
+    client.release();
+  }
+});
+
+// Historial de ajustes manuales de refacciones -- mismo formato de fila que
+// GET /productos/movimientos para que Kardex pueda mezclar ambas listas.
+router.get('/movimientos', requireRole('admin'), async (req, res) => {
+  const { sucursal_id, desde, hasta } = req.query;
+  const { rows } = await pool.query(
+    `SELECT m.id, (ref.nombre || ' (refacción)') AS producto_nombre, m.tipo, m.cantidad, m.motivo,
+            m.usuario_id, u.nombre AS usuario_nombre, m.created_at
+     FROM movimientos_refacciones m
+     JOIN refacciones ref ON ref.id = m.refaccion_id
+     LEFT JOIN usuarios u ON u.id = m.usuario_id
+     WHERE ($1::uuid IS NULL OR m.sucursal_id = $1::uuid)
+       AND ($2::timestamptz IS NULL OR m.created_at >= $2::timestamptz)
+       AND ($3::timestamptz IS NULL OR m.created_at < $3::timestamptz)
+     ORDER BY m.created_at DESC
+     LIMIT 200`,
+    [sucursal_id || null, desde ? inicioDiaUTC(desde) : null, hasta ? finDiaUTCExclusivo(hasta) : null]
+  );
+  res.json(rows);
 });
 
 module.exports = router;

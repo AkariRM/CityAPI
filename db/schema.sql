@@ -563,6 +563,20 @@ CREATE TABLE refacciones (
 );
 CREATE INDEX idx_refacciones_sucursal ON refacciones(sucursal_id);
 
+-- Ajustes manuales de stock de refacciones (Stock/Kardex) -- ver
+-- migracion_movimientos_refacciones.sql.
+CREATE TABLE movimientos_refacciones (
+  id            uuid PRIMARY KEY DEFAULT gen_random_uuid(),
+  refaccion_id  uuid NOT NULL REFERENCES refacciones(id),
+  sucursal_id   uuid NOT NULL REFERENCES sucursales(id),
+  tipo          tipo_movimiento_inventario NOT NULL,
+  cantidad      integer NOT NULL,
+  motivo        text,
+  usuario_id    uuid REFERENCES usuarios(id),
+  created_at    timestamptz NOT NULL DEFAULT now()
+);
+CREATE INDEX idx_movimientos_refacciones ON movimientos_refacciones(refaccion_id, sucursal_id);
+
 -- producto_id (accesorio de catalogo) o refaccion_id (inventario dedicado)
 -- -- exactamente uno de los dos, nunca ambos ni ninguno.
 CREATE TABLE reparacion_refacciones (
