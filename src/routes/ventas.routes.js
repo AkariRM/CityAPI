@@ -315,11 +315,20 @@ router.post('/', async (req, res) => {
         fechaVencimiento = fecha.toISOString().slice(0, 10);
       }
 
+      // El credito de la venta es el que YA tiene asignado el cliente: su limite y
+      // su plazo. Lo que mande la app en limite_aprobado/condiciones se respeta
+      // (compatibilidad con versiones anteriores), pero sin eso salen de la
+      // politica del cliente -- el limite que de verdad se hace cumplir es siempre
+      // el de arriba, nunca el que venga en el body.
+      const limiteAprobadoFinal = limite_aprobado ?? clientePolitica.limite_credito ?? null;
+      const condicionesFinal =
+        condiciones || (clientePolitica.plazo_dias_credito ? `Plazo de ${clientePolitica.plazo_dias_credito} días` : null);
+
       const creditoResult = await client.query(
         `INSERT INTO creditos (cliente_id, venta_id, monto_total, saldo_pendiente, autorizado_por, limite_aprobado, condiciones, fecha_vencimiento)
          VALUES ($1, $2, $3, $3, $4, $5, $6, $7)
          RETURNING id, monto_total, saldo_pendiente, limite_aprobado, condiciones, fecha_vencimiento`,
-        [cliente_id, venta.id, total, req.usuario.sub, limite_aprobado ?? null, condiciones || null, fechaVencimiento]
+        [cliente_id, venta.id, total, req.usuario.sub, limiteAprobadoFinal, condicionesFinal, fechaVencimiento]
       );
       credito = creditoResult.rows[0];
     }
