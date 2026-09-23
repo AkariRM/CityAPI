@@ -407,6 +407,7 @@ CREATE TABLE cambios_equipo (
   cuerpo_ok         boolean NOT NULL DEFAULT true,
   camaras_ok        boolean NOT NULL DEFAULT true,
   botones_ok        boolean NOT NULL DEFAULT true,
+  checklist_revision jsonb,
   valor_referencia  numeric(12,2) NOT NULL DEFAULT 0,
   valor_ofrecido    numeric(12,2) NOT NULL DEFAULT 0,
   estado            estado_cambio_equipo NOT NULL DEFAULT 'evaluando',

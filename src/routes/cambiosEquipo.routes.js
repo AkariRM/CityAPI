@@ -15,7 +15,7 @@ router.get('/', async (req, res) => {
 
   const { rows } = await pool.query(
     `SELECT id, cliente_id, cliente_nombre, equipo_modelo, grado, grado_detalle, bateria_pct,
-            pantalla_ok, cuerpo_ok, camaras_ok, botones_ok,
+            pantalla_ok, cuerpo_ok, camaras_ok, botones_ok, checklist_revision,
             valor_referencia, valor_ofrecido, estado, producto_id, created_at, updated_at
      FROM cambios_equipo
      WHERE ($1::uuid IS NULL OR sucursal_id = $1::uuid) AND ($2::text IS NULL OR estado::text = $2)
@@ -39,6 +39,7 @@ router.post('/', async (req, res) => {
     cuerpo_ok,
     camaras_ok,
     botones_ok,
+    checklist_revision,
     valor_referencia,
     valor_ofrecido,
   } = req.body ?? {};
@@ -50,14 +51,17 @@ router.post('/', async (req, res) => {
   if (grado === 'otro' && !grado_detalle?.trim()) {
     return res.status(400).json({ error: 'Describe la condición cuando eliges "Otro".' });
   }
+  if (checklist_revision !== undefined && checklist_revision !== null && typeof checklist_revision !== 'object') {
+    return res.status(400).json({ error: 'checklist_revision debe ser un objeto.' });
+  }
 
   const { rows } = await pool.query(
     `INSERT INTO cambios_equipo
        (sucursal_id, cliente_id, cliente_nombre, cliente_telefono, equipo_modelo, grado, grado_detalle, bateria_pct,
-        pantalla_ok, cuerpo_ok, camaras_ok, botones_ok, valor_referencia, valor_ofrecido, usuario_id)
-     VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15)
+        pantalla_ok, cuerpo_ok, camaras_ok, botones_ok, checklist_revision, valor_referencia, valor_ofrecido, usuario_id)
+     VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16)
      RETURNING id, cliente_id, cliente_nombre, cliente_telefono, equipo_modelo, grado, grado_detalle, bateria_pct,
-               pantalla_ok, cuerpo_ok, camaras_ok, botones_ok, valor_referencia, valor_ofrecido, estado, created_at`,
+               pantalla_ok, cuerpo_ok, camaras_ok, botones_ok, checklist_revision, valor_referencia, valor_ofrecido, estado, created_at`,
     [
       sucursal_id,
       cliente_id || null,
@@ -71,6 +75,7 @@ router.post('/', async (req, res) => {
       cuerpo_ok ?? true,
       camaras_ok ?? true,
       botones_ok ?? true,
+      checklist_revision ?? null,
       valor_referencia || 0,
       valor_ofrecido || 0,
       req.usuario.sub,
