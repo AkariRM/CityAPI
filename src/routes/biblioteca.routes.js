@@ -16,7 +16,7 @@ router.get('/', async (req, res) => {
 
      UNION ALL
 
-     SELECT rf.id, (r.folio || ' — ' || rf.etiqueta::text) AS nombre, 'Reparación' AS tipo, rf.url, rf.created_at AS fecha
+     SELECT rf.id, (r.folio || ' — ' || COALESCE(rf.estado::text, rf.etiqueta::text, 'foto')) AS nombre, 'Reparación' AS tipo, rf.url, rf.created_at AS fecha
      FROM reparacion_fotos rf
      JOIN reparaciones r ON r.id = rf.reparacion_id
 

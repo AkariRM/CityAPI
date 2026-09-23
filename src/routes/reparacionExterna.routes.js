@@ -23,6 +23,10 @@ const ESTADO_EXTERNO = {
 // es una cotizacion sin confirmar y el agente tiene prohibido darla.
 const ESTADOS_CON_COSTO_AUTORIZADO = new Set(['reparacion', 'listo', 'entregado']);
 
+// Solo tiene sentido hablar de "tiempo restante" mientras el equipo sigue en
+// manos del taller -- de "listo" en adelante ya no hay nada que esperar.
+const ESTADOS_CON_TIEMPO_RESTANTE = new Set(['recibido', 'diagnostico', 'esperando_autorizacion', 'reparacion']);
+
 // GET /reparacion-externa?telefono=+523531234567   -> reparaciones abiertas de ese cliente
 // GET /reparacion-externa?folio=REP-2026-0842      -> esa reparacion especifica (cualquier estado)
 router.get('/', verificarSecreto, async (req, res) => {
@@ -35,9 +39,14 @@ router.get('/', verificarSecreto, async (req, res) => {
   // "3315875649"); el agente manda formato E.164 (ej. "+523531234567").
   // Se comparan solo los ultimos 10 digitos de cada lado para que ambos
   // formatos (con o sin +52, con o sin espacios/guiones) coincidan igual.
+  // dias_restantes: fecha_estimada_entrega se guarda como el dia elegido a
+  // medianoche UTC (asi la escribe/lee la app), y "hoy" se toma en hora de
+  // Mexico -- comparar ambos como fechas evita el desfase de un dia. Negativo
+  // = ya va atrasada.
   const { rows } = await pool.query(
-    `SELECT r.folio, r.estado, r.equipo_marca, r.equipo_modelo, r.problema_reportado,
-            r.created_at, r.fecha_estimada_entrega, r.total, r.nota_para_cliente, s.nombre AS sucursal_nombre
+    `SELECT r.id, r.folio, r.estado, r.equipo_marca, r.equipo_modelo, r.problema_reportado,
+            r.created_at, r.fecha_estimada_entrega, r.total, r.nota_para_cliente, s.nombre AS sucursal_nombre,
+            ((r.fecha_estimada_entrega AT TIME ZONE 'UTC')::date - (now() AT TIME ZONE 'America/Mexico_City')::date) AS dias_restantes
      FROM reparaciones r
      JOIN clientes c ON c.id = r.cliente_id
      JOIN sucursales s ON s.id = r.sucursal_id
@@ -48,6 +57,25 @@ router.get('/', verificarSecreto, async (req, res) => {
     [folio || null, telefono || null]
   );
 
+  // Fotos del ESTADO ACTUAL de cada folio (una sola consulta para todos,
+  // en el orden en que se subieron) -- las de estados anteriores no se
+  // mandan: el cliente pregunta "como va", no "como iba".
+  const fotosPorFolio = new Map();
+  if (rows.length > 0) {
+    const fotos = await pool.query(
+      `SELECT f.reparacion_id, f.url
+       FROM reparacion_fotos f
+       JOIN reparaciones r ON r.id = f.reparacion_id AND r.estado = f.estado
+       WHERE f.reparacion_id = ANY($1::uuid[])
+       ORDER BY f.created_at ASC`,
+      [rows.map((r) => r.id)]
+    );
+    for (const f of fotos.rows) {
+      if (!fotosPorFolio.has(f.reparacion_id)) fotosPorFolio.set(f.reparacion_id, []);
+      fotosPorFolio.get(f.reparacion_id).push(f.url);
+    }
+  }
+
   res.json(
     rows.map((r) => ({
       folio: r.folio,
@@ -56,10 +84,12 @@ router.get('/', verificarSecreto, async (req, res) => {
       falla_reportada: r.problema_reportado,
       fecha_ingreso: r.created_at,
       fecha_estimada_entrega: r.fecha_estimada_entrega,
+      dias_restantes: ESTADOS_CON_TIEMPO_RESTANTE.has(r.estado) && r.dias_restantes != null ? Number(r.dias_restantes) : null,
       costo_autorizado: ESTADOS_CON_COSTO_AUTORIZADO.has(r.estado) ? Number(r.total) : null,
       requiere_autorizacion: r.estado === 'esperando_autorizacion',
       sucursal: r.sucursal_nombre,
       nota_para_cliente: r.nota_para_cliente || null,
+      fotos_estado_actual: fotosPorFolio.get(r.id) ?? [],
     }))
   );
 });

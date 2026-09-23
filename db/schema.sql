@@ -628,9 +628,13 @@ CREATE TABLE reparacion_fotos (
   reparacion_id  uuid NOT NULL REFERENCES reparaciones(id) ON DELETE CASCADE,
   url            text NOT NULL,
   etiqueta       etiqueta_foto_reparacion,
+  -- Estado del folio al que pertenece la foto (1-5 por estado, tope
+  -- aplicado en la API) -- ver migracion_fotos_reparacion_por_estado.sql.
+  estado         estado_reparacion,
   created_at     timestamptz NOT NULL DEFAULT now()
 );
 CREATE INDEX idx_reparacion_fotos_reparacion ON reparacion_fotos(reparacion_id);
+CREATE INDEX idx_reparacion_fotos_reparacion_estado ON reparacion_fotos(reparacion_id, estado);
 
 CREATE TABLE notificaciones_cliente (
   id             uuid PRIMARY KEY DEFAULT gen_random_uuid(),

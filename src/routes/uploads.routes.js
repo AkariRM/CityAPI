@@ -4,7 +4,9 @@ const { requireAuth, requireRole } = require('../middleware/auth');
 const { subirBufferABucket, EXTENSIONES, detectarTipoReal } = require('../utils/almacenamiento');
 
 const router = express.Router();
-router.use(requireAuth, requireRole('admin', 'vendedor', 'pto'));
+// tecnico: sube las fotos de avance del folio de reparacion (ver
+// POST /reparaciones/:id/fotos).
+router.use(requireAuth, requireRole('admin', 'vendedor', 'pto', 'tecnico'));
 
 // El bucket es publico de LECTURA (fotos de catalogo, no hay nada sensible
 // que proteger); lo que si esta cerrado es la escritura — solo este

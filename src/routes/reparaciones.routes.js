@@ -135,6 +135,16 @@ router.get('/:id', async (req, res) => {
     [req.params.id]
   );
 
+  // Solo las que ya estan ligadas a un estado (las filas heredadas sin
+  // estado, de antes de esta funcion, no se muestran en el folio).
+  const fotos = await pool.query(
+    `SELECT id, url, estado, created_at
+     FROM reparacion_fotos
+     WHERE reparacion_id = $1 AND estado IS NOT NULL
+     ORDER BY created_at ASC`,
+    [req.params.id]
+  );
+
   // Datos del ticket embebidos aqui (no via GET /configuracion-ticket, que es
   // solo-admin) para que tecnico/vendedor tambien puedan imprimir el
   // comprobante sin necesitar ese permiso — mismo patron que POST /ventas.
@@ -145,6 +155,7 @@ router.get('/:id', async (req, res) => {
     historial: historial.rows,
     refacciones: refacciones.rows,
     abonos: abonos.rows,
+    fotos: fotos.rows,
     nombre_negocio: configTicket.nombre_negocio,
     mostrar_direccion: configTicket.mostrar_direccion,
     mostrar_telefono: configTicket.mostrar_telefono,
@@ -464,6 +475,69 @@ router.post('/:id/abonos', requireRole('admin', 'vendedor'), async (req, res) =>
   } finally {
     client.release();
   }
+});
+
+const MAX_FOTOS_POR_ESTADO = 5;
+
+// La URL solo puede venir de nuestro propio bucket (la que devuelve
+// POST /uploads/imagen) -- estas fotos terminan mandandose al cliente por
+// WhatsApp, asi que no se acepta un enlace externo arbitrario.
+function urlDeNuestroBucket(url) {
+  if (typeof url !== 'string' || url.length > 2048 || !url.startsWith('https://')) return false;
+  const base = process.env.SUPABASE_URL;
+  return base ? url.startsWith(`${base}/storage/v1/object/public/`) : true;
+}
+
+// Fotos del folio por estado (1-5 cada uno) -- sirven para que el agente de
+// WhatsApp le responda al cliente con la foto del estado actual (ver
+// reparacionExterna.routes.js). Las pueden manejar quienes pueden abrir el
+// folio: el vendedor toma las de recepcion/entrega, el tecnico las del taller.
+router.post('/:id/fotos', async (req, res) => {
+  const { estado, url } = req.body ?? {};
+  if (!ESTADOS_VALIDOS.includes(estado)) return res.status(400).json({ error: 'Estado inválido.' });
+  if (!urlDeNuestroBucket(url)) return res.status(400).json({ error: 'URL de imagen inválida.' });
+
+  const client = await pool.connect();
+  try {
+    await client.query('BEGIN');
+
+    // Bloquea el folio para que dos fotos subidas en paralelo no se salten
+    // el tope de 5 (el frontend las sube todas a la vez).
+    const reparacion = await client.query(`SELECT id FROM reparaciones WHERE id = $1 FOR UPDATE`, [req.params.id]);
+    if (!reparacion.rows[0]) throw Object.assign(new Error('Reparación no encontrada.'), { statusCode: 404 });
+
+    const { rows: conteo } = await client.query(
+      `SELECT count(*)::int AS total FROM reparacion_fotos WHERE reparacion_id = $1 AND estado = $2`,
+      [req.params.id, estado]
+    );
+    if (conteo[0].total >= MAX_FOTOS_POR_ESTADO) {
+      throw Object.assign(new Error(`Cada estado admite máximo ${MAX_FOTOS_POR_ESTADO} fotos.`), { statusCode: 409 });
+    }
+
+    const { rows } = await client.query(
+      `INSERT INTO reparacion_fotos (reparacion_id, url, estado) VALUES ($1, $2, $3)
+       RETURNING id, url, estado, created_at`,
+      [req.params.id, url, estado]
+    );
+
+    await client.query('COMMIT');
+    res.status(201).json(rows[0]);
+  } catch (err) {
+    await client.query('ROLLBACK');
+    res.status(err.statusCode ?? 500).json({ error: err.statusCode ? err.message : 'Error interno del servidor.' });
+    if (!err.statusCode) console.error(err);
+  } finally {
+    client.release();
+  }
+});
+
+router.delete('/:id/fotos/:fotoId', async (req, res) => {
+  const { rowCount } = await pool.query(
+    `DELETE FROM reparacion_fotos WHERE id = $1 AND reparacion_id = $2`,
+    [req.params.fotoId, req.params.id]
+  );
+  if (rowCount === 0) return res.status(404).json({ error: 'Foto no encontrada.' });
+  res.status(204).end();
 });
 
 module.exports = router;
