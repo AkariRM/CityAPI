@@ -532,6 +532,10 @@ CREATE TABLE reparaciones (
   -- Respuesta Si/No de "el equipo enciende" al recibirlo. Null en folios
   -- anteriores a este campo y en equipos propios. Solo visible en la app.
   equipo_enciende    boolean,
+  -- El cliente rechazo la cotizacion por WhatsApp (ver migracion_cotizacion_rechazada.sql):
+  -- cuando y que monto. El folio sigue en esperando_autorizacion.
+  cotizacion_rechazada_at    timestamptz,
+  cotizacion_rechazada_monto numeric(12,2),
   -- producto_id/unidad_imei_id solo se usan cuando origen_reparacion es
   -- 'compra_propia' (equipo del propio inventario mandado a revision antes
   -- de publicarse en catalogo, ver EquipoFormModal) -- para una reparacion

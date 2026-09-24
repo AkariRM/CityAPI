@@ -72,7 +72,8 @@ router.get('/', async (req, res) => {
             r.equipo_marca, r.equipo_modelo, r.imei_equipo, r.problema_reportado, r.diagnostico,
             r.estado, r.prioridad, r.tecnico_id, t.nombre AS tecnico_nombre,
             r.costo_mano_obra, r.costo_refacciones, r.total, r.garantia_dias,
-            r.origen_reparacion, r.producto_id, p.nombre AS producto_nombre, r.unidad_imei_id, r.created_at, r.updated_at
+            r.origen_reparacion, r.producto_id, p.nombre AS producto_nombre, r.unidad_imei_id, r.created_at, r.updated_at,
+            (r.estado = 'esperando_autorizacion' AND r.cotizacion_rechazada_at IS NOT NULL AND r.cotizacion_rechazada_monto = r.total) AS cotizacion_rechazada
      FROM reparaciones r
      LEFT JOIN clientes c ON c.id = r.cliente_id
      LEFT JOIN productos p ON p.id = r.producto_id
@@ -97,6 +98,8 @@ router.get('/:id', async (req, res) => {
             r.estado, r.prioridad, r.tecnico_id, t.nombre AS tecnico_nombre,
             r.costo_mano_obra, r.costo_refacciones, r.total, r.garantia_dias, r.monto_pagado,
             r.fecha_estimada_entrega, r.nota_para_cliente, r.checklist_revision,
+            r.cotizacion_rechazada_at, r.cotizacion_rechazada_monto,
+            (r.estado = 'esperando_autorizacion' AND r.cotizacion_rechazada_at IS NOT NULL AND r.cotizacion_rechazada_monto = r.total) AS cotizacion_rechazada,
             r.origen_reparacion, r.producto_id, prod.nombre AS producto_nombre, prod.activo AS producto_activo, r.unidad_imei_id, r.created_at, r.updated_at
      FROM reparaciones r
      LEFT JOIN clientes c ON c.id = r.cliente_id
@@ -294,6 +297,12 @@ router.patch('/:id', async (req, res) => {
       values.push(value);
     }
   }
+  // Un cambio de estado hecho por el personal cierra el tema de una cotizacion
+  // rechazada por WhatsApp (el cambio de monto tambien la invalida, ver
+  // cotizacion_rechazada en las consultas: solo cuenta si el total no cambio).
+  if (req.body?.estado !== undefined && req.body.estado !== actual.estado) {
+    sets.push('cotizacion_rechazada_at = NULL', 'cotizacion_rechazada_monto = NULL');
+  }
   sets.push(`total = $${i++}`);
   values.push(total);
 
@@ -306,7 +315,9 @@ router.patch('/:id', async (req, res) => {
       `UPDATE reparaciones SET ${sets.join(', ')} WHERE id = $${i}
        RETURNING id, folio, cliente_id, sucursal_id, equipo_marca, equipo_modelo, imei_equipo, problema_reportado,
                  diagnostico, estado, prioridad, tecnico_id, costo_mano_obra, costo_refacciones, total, monto_pagado, garantia_dias,
-                 fecha_estimada_entrega, nota_para_cliente, checklist_revision, equipo_enciende, origen_reparacion, producto_id, unidad_imei_id, created_at, updated_at`,
+                 fecha_estimada_entrega, nota_para_cliente, checklist_revision, equipo_enciende, origen_reparacion, producto_id, unidad_imei_id, created_at, updated_at,
+                 cotizacion_rechazada_at,
+                 (estado = 'esperando_autorizacion' AND cotizacion_rechazada_at IS NOT NULL AND cotizacion_rechazada_monto = total) AS cotizacion_rechazada`,
       values
     );
 
