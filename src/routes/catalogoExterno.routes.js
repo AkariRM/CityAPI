@@ -2,6 +2,7 @@ const express = require('express');
 const { pool } = require('../db');
 const { verificarSecreto } = require('../middleware/webhookSecret');
 const { derivarMarcaCategoria, extraerAlmacenamientoGb, extraerSaludBateria } = require('../utils/clasificarEquipo');
+const { liberarApartadosVencidos } = require('../utils/apartados');
 
 const router = express.Router();
 
@@ -14,6 +15,8 @@ const router = express.Router();
 // existencias: sin este filtro el agente podia ofrecer un celular ya vendido,
 // y un apartado no lo sacaba del catalogo. Con un id puntual que ya no tiene
 // existencia el resultado es [] (el agente sabe que ya no esta).
+// Un equipo apartado (por el personal o por el agente) deja de salir mientras el
+// apartado siga activo; si vence, se libera aqui mismo antes de calcular y vuelve a salir.
 // Se excluyen a proposito costo, precio_mayoreo, precio_revendedor,
 // proveedor y stock: son datos internos del negocio, no algo que deba
 // salir hacia un servicio externo.
@@ -24,6 +27,7 @@ router.get('/', verificarSecreto, async (req, res) => {
     : null;
 
   try {
+    await liberarApartadosVencidos(pool);
     const { rows } = await pool.query(
       `SELECT p.id, p.sku, p.nombre, p.tipo, c.nombre AS categoria, p.marca, p.modelo,
               p.almacenamiento, p.color, p.precio_venta, p.imagen_url,

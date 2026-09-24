@@ -1,18 +1,23 @@
 const express = require('express');
 const { pool } = require('../db');
 const { requireAuth, requireRole } = require('../middleware/auth');
+const { obtenerConfiguracionTicket } = require('../utils/configuracionTicket');
+const { liberarApartadosVencidos } = require('../utils/apartados');
 
 const router = express.Router();
 router.use(requireAuth, requireRole('admin', 'vendedor'));
 
 const METODOS_VALIDOS = ['efectivo', 'tarjeta'];
+// 'vencido' NO se puede poner a mano: lo asigna el sistema al terminar la vigencia de un
+// apartado del agente de WhatsApp (utils/apartados.js).
 const ESTADOS_VALIDOS = ['activo', 'completado', 'cancelado'];
 
 router.get('/', async (req, res) => {
   const { sucursal_id, cliente_id, estado, producto_id } = req.query;
+  await liberarApartadosVencidos(pool);
   const { rows } = await pool.query(
     `SELECT a.id, a.folio, a.cliente_id, cl.nombre AS cliente_nombre, a.sucursal_id, a.producto_id, p.nombre AS producto_nombre,
-            a.unidad_imei_id, u.imei, a.cantidad, a.precio_total, a.monto_abonado, a.estado,
+            a.unidad_imei_id, u.imei, a.cantidad, a.precio_total, a.monto_abonado, a.estado, a.origen, a.vence_at,
             a.usuario_id, us.nombre AS usuario_nombre, a.created_at, a.updated_at
      FROM apartados a
      JOIN clientes cl ON cl.id = a.cliente_id
@@ -30,10 +35,12 @@ router.get('/', async (req, res) => {
 });
 
 router.get('/:id', async (req, res) => {
+  await liberarApartadosVencidos(pool);
   const apartadoResult = await pool.query(
     `SELECT a.id, a.folio, a.cliente_id, cl.nombre AS cliente_nombre, cl.telefono AS cliente_telefono,
+            cl.origen AS cliente_origen,
             a.sucursal_id, a.producto_id, p.nombre AS producto_nombre, a.unidad_imei_id, u.imei,
-            a.cantidad, a.precio_total, a.monto_abonado, a.estado,
+            a.cantidad, a.precio_total, a.monto_abonado, a.estado, a.origen, a.vence_at,
             a.usuario_id, us.nombre AS usuario_nombre, a.created_at, a.updated_at
      FROM apartados a
      JOIN clientes cl ON cl.id = a.cliente_id
@@ -69,6 +76,8 @@ router.post('/', async (req, res) => {
   if (montoAnticipo > 0 && !METODOS_VALIDOS.includes(metodo)) return res.status(400).json({ error: 'Método de pago inválido para el anticipo.' });
   if (montoAnticipo > Number(precio_total)) return res.status(400).json({ error: 'El anticipo no puede ser mayor al precio total.' });
 
+  // Si el equipo estaba apartado por el agente y ya vencio, hay que liberarlo antes de ver la existencia.
+  await liberarApartadosVencidos(pool);
   const client = await pool.connect();
   try {
     await client.query('BEGIN');
@@ -127,6 +136,7 @@ router.post('/:id/abonos', async (req, res) => {
   if (!(Number(monto) > 0)) return res.status(400).json({ error: 'monto debe ser mayor a 0.' });
   if (!METODOS_VALIDOS.includes(metodo)) return res.status(400).json({ error: 'Método de pago inválido.' });
 
+  await liberarApartadosVencidos(pool);
   const client = await pool.connect();
   try {
     await client.query('BEGIN');
@@ -148,10 +158,41 @@ router.post('/:id/abonos', async (req, res) => {
     );
 
     const nuevoMontoAbonado = Number(apartado.monto_abonado) + Number(monto);
-    await client.query(`UPDATE apartados SET monto_abonado = $1::numeric, updated_at = now() WHERE id = $2`, [nuevoMontoAbonado, req.params.id]);
+    // vence_at = NULL: si lo habia apartado el agente, con el primer abono deja de vencer.
+    await client.query(`UPDATE apartados SET monto_abonado = $1::numeric, vence_at = NULL, updated_at = now() WHERE id = $2`, [nuevoMontoAbonado, req.params.id]);
 
     await client.query('COMMIT');
     res.status(201).json({ ...abono.rows[0], monto_abonado: nuevoMontoAbonado });
+  } catch (err) {
+    await client.query('ROLLBACK');
+    res.status(err.statusCode ?? 500).json({ error: err.statusCode ? err.message : 'Error interno del servidor.' });
+    if (!err.statusCode) console.error(err);
+  } finally {
+    client.release();
+  }
+});
+
+// Da mas tiempo a un apartado del agente que sigue activo: la nueva hora limite es
+// AHORA + las horas configuradas (no se suma a lo que le quedaba). Solo el personal lo hace.
+router.patch('/:id/extender', async (req, res) => {
+  await liberarApartadosVencidos(pool);
+  const config = await obtenerConfiguracionTicket(pool);
+  const client = await pool.connect();
+  try {
+    await client.query('BEGIN');
+    const actual = (await client.query(`SELECT estado, origen, vence_at FROM apartados WHERE id = $1 FOR UPDATE`, [req.params.id])).rows[0];
+    if (!actual) throw Object.assign(new Error('Apartado no encontrado.'), { statusCode: 404 });
+    if (actual.origen !== 'agente') throw Object.assign(new Error('Solo los apartados del agente de WhatsApp tienen vigencia.'), { statusCode: 409 });
+    if (actual.estado !== 'activo') throw Object.assign(new Error('Este apartado ya no está activo.'), { statusCode: 409 });
+    if (!actual.vence_at) throw Object.assign(new Error('Este apartado ya tiene un abono y no vence.'), { statusCode: 409 });
+
+    const { rows } = await client.query(
+      `UPDATE apartados SET vence_at = now() + make_interval(hours => $1::int), updated_at = now() WHERE id = $2
+       RETURNING id, folio, estado, origen, vence_at`,
+      [config.agente_apartado_horas, req.params.id]
+    );
+    await client.query('COMMIT');
+    res.json(rows[0]);
   } catch (err) {
     await client.query('ROLLBACK');
     res.status(err.statusCode ?? 500).json({ error: err.statusCode ? err.message : 'Error interno del servidor.' });
@@ -165,6 +206,7 @@ router.patch('/:id', async (req, res) => {
   const { estado } = req.body ?? {};
   if (!ESTADOS_VALIDOS.includes(estado) || estado === 'activo') return res.status(400).json({ error: 'Estado inválido.' });
 
+  await liberarApartadosVencidos(pool);
   const client = await pool.connect();
   try {
     await client.query('BEGIN');

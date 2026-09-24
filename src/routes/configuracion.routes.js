@@ -7,6 +7,13 @@ const router = express.Router();
 
 router.use(requireAuth);
 
+// Apartados del agente de WhatsApp: rango permitido de cada ajuste (el mismo CHECK que
+// tiene la tabla, para responder 400 con un mensaje claro en vez de un error de la BD).
+const LIMITES_AGENTE = {
+  agente_apartado_horas: { min: 1, max: 720, texto: 'Las horas de apartado' },
+  agente_apartado_max_por_telefono: { min: 1, max: 10, texto: 'El máximo de apartados por teléfono' },
+};
+
 // Cualquier rol autenticado puede LEER la configuracion (Equipos la
 // necesita para saber si debe auto-imprimir el sticker al dar de alta un
 // equipo, sin importar que rol lo esta registrando) -- solo modificarla
@@ -30,7 +37,15 @@ router.patch('/', requireRole('admin'), async (req, res) => {
     reactivacion_catalogo_automatica: req.body?.reactivacion_catalogo_automatica,
     bloquear_entrega_con_saldo: req.body?.bloquear_entrega_con_saldo,
     pieza_externa_requiere_catalogo: req.body?.pieza_externa_requiere_catalogo,
+    agente_apartado_horas: req.body?.agente_apartado_horas,
+    agente_apartado_max_por_telefono: req.body?.agente_apartado_max_por_telefono,
   };
+  for (const [campo, { min, max, texto }] of Object.entries(LIMITES_AGENTE)) {
+    const v = fields[campo];
+    if (v !== undefined && !(Number.isInteger(v) && v >= min && v <= max)) {
+      return res.status(400).json({ error: `${texto} debe ser un número entero entre ${min} y ${max}.` });
+    }
+  }
   const sets = [];
   const values = [];
   let i = 1;

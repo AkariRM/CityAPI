@@ -39,7 +39,11 @@ CREATE TYPE metodo_pago AS ENUM ('efectivo', 'tarjeta', 'credito');
 CREATE TYPE estado_venta AS ENUM ('completada', 'cancelada');
 CREATE TYPE tipo_producto AS ENUM ('nuevo', 'usado', 'accesorio', 'servicio');
 CREATE TYPE estado_unidad_imei AS ENUM ('disponible', 'apartado', 'vendido', 'en_garantia', 'en_reparacion', 'baja');
-CREATE TYPE estado_apartado AS ENUM ('activo', 'completado', 'cancelado');
+-- 'vencido' = apartado del agente de WhatsApp cuya vigencia termino sin que el
+-- cliente pasara (ver migracion_apartados_agente.sql). Libera el stock igual que
+-- cancelar, pero queda como estado propio para distinguir "se le acabo el tiempo"
+-- de "alguien lo cancelo".
+CREATE TYPE estado_apartado AS ENUM ('activo', 'completado', 'cancelado', 'vencido');
 CREATE TYPE tipo_movimiento_inventario AS ENUM ('entrada', 'salida', 'ajuste', 'traspaso');
 CREATE TYPE estado_credito AS ENUM ('activo', 'pagado', 'vencido', 'cancelado');
 CREATE TYPE estado_reparacion AS ENUM ('recibido', 'diagnostico', 'esperando_autorizacion', 'reparacion', 'listo', 'entregado', 'cancelado');
@@ -153,6 +157,9 @@ CREATE TABLE clientes (
   telefono    text,
   -- Segundo numero de contacto (ver migracion_equipo_enciende_telefono_adicional.sql).
   telefono_adicional text,
+  -- Quien lo dio de alta: 'personal' (desde la app) o 'agente_whatsapp' (lo
+  -- registro solo el agente al apartar un equipo). Ver migracion_apartados_agente.sql.
+  origen      text NOT NULL DEFAULT 'personal' CHECK (origen IN ('personal', 'agente_whatsapp')),
   email       text,
   direccion   text,
   notas       text,
@@ -282,13 +289,20 @@ CREATE TABLE apartados (
   precio_total    numeric(12,2) NOT NULL,
   monto_abonado   numeric(12,2) NOT NULL DEFAULT 0,
   estado          estado_apartado NOT NULL DEFAULT 'activo',
-  usuario_id      uuid NOT NULL REFERENCES usuarios(id),
+  -- NULL cuando lo crea el agente de WhatsApp (no hay usuario de la app de por medio).
+  usuario_id      uuid REFERENCES usuarios(id),
+  -- 'personal' (desde la app) o 'agente' (lo aparto el agente de WhatsApp). Solo los
+  -- del agente vencen: vence_at es la hora limite; NULL = no vence (los del personal,
+  -- o uno del agente que ya recibio un abono). Ver migracion_apartados_agente.sql.
+  origen          text NOT NULL DEFAULT 'personal' CHECK (origen IN ('personal', 'agente')),
+  vence_at        timestamptz,
   created_at      timestamptz NOT NULL DEFAULT now(),
   updated_at      timestamptz NOT NULL DEFAULT now()
 );
 CREATE INDEX idx_apartados_cliente ON apartados(cliente_id);
 CREATE INDEX idx_apartados_producto ON apartados(producto_id, sucursal_id);
 CREATE INDEX idx_apartados_estado ON apartados(estado);
+CREATE INDEX idx_apartados_vence ON apartados(vence_at) WHERE estado = 'activo' AND vence_at IS NOT NULL;
 
 CREATE TABLE apartado_abonos (
   id            uuid PRIMARY KEY DEFAULT gen_random_uuid(),
@@ -872,6 +886,10 @@ CREATE TABLE configuracion_ticket (
   -- reparacion; si false, se aprueba tal cual y el costo solo queda
   -- registrado en la solicitud (el admin lo refleja a mano si quiere).
   pieza_externa_requiere_catalogo boolean NOT NULL DEFAULT false,
+  -- Apartados que hace el agente de WhatsApp: cuantas horas dura la reserva y
+  -- cuantas puede tener a la vez un mismo telefono (ver migracion_apartados_agente.sql).
+  agente_apartado_horas       integer NOT NULL DEFAULT 48 CHECK (agente_apartado_horas BETWEEN 1 AND 720),
+  agente_apartado_max_por_telefono integer NOT NULL DEFAULT 1 CHECK (agente_apartado_max_por_telefono BETWEEN 1 AND 10),
   updated_at                  timestamptz NOT NULL DEFAULT now()
 );
 

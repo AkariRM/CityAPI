@@ -2,6 +2,7 @@ const express = require('express');
 const { pool } = require('../db');
 const { requireAuth, requireRole, esAdminODueno } = require('../middleware/auth');
 const { inicioDiaUTC, finDiaUTCExclusivo } = require('../utils/fechas');
+const { liberarApartadosVencidos } = require('../utils/apartados');
 
 const router = express.Router();
 
@@ -19,6 +20,9 @@ router.get('/', requireRole('admin', 'vendedor', 'tecnico', 'community_manager')
 
   const tipos = tipo ? tipo.split(',').map((t) => t.trim()) : null;
   const activoFiltro = activo === undefined ? true : activo === 'true';
+
+  // Apartados del agente vencidos: se liberan antes de leer el stock apartado.
+  await liberarApartadosVencidos(pool);
 
   // precio_venta ya viene resuelto (precio especial del cliente > precio
   // especial del rol del usuario que consulta > precio de lista), para que

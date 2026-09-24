@@ -26,4 +26,17 @@ function hoyLocal() {
   return new Date(Date.now() - OFFSET_SUCURSAL_MS).toISOString().slice(0, 10);
 }
 
-module.exports = { inicioDiaUTC, finDiaUTCExclusivo, hoyLocal };
+const DIAS = ['domingo', 'lunes', 'martes', 'miércoles', 'jueves', 'viernes', 'sábado'];
+const MESES = ['enero', 'febrero', 'marzo', 'abril', 'mayo', 'junio', 'julio', 'agosto', 'septiembre', 'octubre', 'noviembre', 'diciembre'];
+
+// Fecha y hora tal como las dice la sucursal (UTC-6), en texto listo para un mensaje:
+// "jueves 25 de septiembre, 3:40 p. m.". Recibe un Date, un timestamp o un ISO.
+function textoFechaHoraLocal(fecha) {
+  const d = new Date(new Date(fecha).getTime() - OFFSET_SUCURSAL_MS);
+  const h24 = d.getUTCHours();
+  const h12 = h24 % 12 === 0 ? 12 : h24 % 12;
+  const min = String(d.getUTCMinutes()).padStart(2, '0');
+  return `${DIAS[d.getUTCDay()]} ${d.getUTCDate()} de ${MESES[d.getUTCMonth()]}, ${h12}:${min} ${h24 < 12 ? 'a. m.' : 'p. m.'}`;
+}
+
+module.exports = { inicioDiaUTC, finDiaUTCExclusivo, hoyLocal, textoFechaHoraLocal };

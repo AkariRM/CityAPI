@@ -2,6 +2,7 @@ const express = require('express');
 const { pool } = require('../db');
 const { requireAuth, requireRole, esAdminODueno } = require('../middleware/auth');
 const { marcarCreditosVencidos } = require('../utils/creditos');
+const { liberarApartadosVencidos } = require('../utils/apartados');
 
 const router = express.Router();
 
@@ -16,7 +17,7 @@ router.get('/', async (req, res) => {
   const { q } = req.query;
   await marcarCreditosVencidos(pool);
   const { rows } = await pool.query(
-    `SELECT c.id, c.nombre, c.telefono, c.telefono_adicional, c.email, c.direccion, c.notas, c.tipo_precio, c.created_at,
+    `SELECT c.id, c.nombre, c.telefono, c.telefono_adicional, c.email, c.direccion, c.notas, c.tipo_precio, c.origen, c.created_at,
             c.permite_credito, c.limite_credito, c.plazo_dias_credito,
             COALESCE(v.numero_compras, 0) AS numero_compras,
             COALESCE(r.numero_reparaciones, 0) AS numero_reparaciones,
@@ -64,8 +65,9 @@ async function abonosAgrupados(tabla, columnaPadre, idsPadre) {
 
 router.get('/:id', async (req, res) => {
   await marcarCreditosVencidos(pool);
+  await liberarApartadosVencidos(pool);
   const { rows } = await pool.query(
-    `SELECT id, nombre, telefono, telefono_adicional, email, direccion, notas, tipo_precio,
+    `SELECT id, nombre, telefono, telefono_adicional, email, direccion, notas, tipo_precio, origen,
             permite_credito, limite_credito, plazo_dias_credito, created_at
      FROM clientes WHERE id = $1`,
     [req.params.id]
@@ -90,7 +92,7 @@ router.get('/:id', async (req, res) => {
   const abonosPorCredito = await abonosAgrupados('abonos', 'credito_id', creditos.rows.map((c) => c.id));
 
   const apartados = await pool.query(
-    `SELECT a.id, a.folio, a.producto_id, p.nombre AS producto_nombre, a.cantidad, a.precio_total, a.monto_abonado, a.estado, a.created_at
+    `SELECT a.id, a.folio, a.producto_id, p.nombre AS producto_nombre, a.cantidad, a.precio_total, a.monto_abonado, a.estado, a.origen, a.vence_at, a.created_at
      FROM apartados a JOIN productos p ON p.id = a.producto_id
      WHERE a.cliente_id = $1
      ORDER BY a.created_at DESC`,
