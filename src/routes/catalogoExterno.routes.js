@@ -8,6 +8,12 @@ const router = express.Router();
 // GET /catalogo-externo            -> catalogo completo (productos activos)
 // GET /catalogo-externo?id=uuid    -> un producto
 // GET /catalogo-externo?ids=uuid1,uuid2 -> varios productos
+// Solo salen productos activos CON EXISTENCIA DISPONIBLE (existencias menos
+// apartados, en cualquier sucursal) o servicios, que no llevan inventario. Un
+// equipo vendido sigue "activo" (eso es una baja manual), pero con cero
+// existencias: sin este filtro el agente podia ofrecer un celular ya vendido,
+// y un apartado no lo sacaba del catalogo. Con un id puntual que ya no tiene
+// existencia el resultado es [] (el agente sabe que ya no esta).
 // Se excluyen a proposito costo, precio_mayoreo, precio_revendedor,
 // proveedor y stock: son datos internos del negocio, no algo que deba
 // salir hacia un servicio externo.
@@ -25,6 +31,13 @@ router.get('/', verificarSecreto, async (req, res) => {
        FROM productos p
        LEFT JOIN categorias c ON c.id = p.categoria_id
        WHERE p.activo = true
+         AND (
+           p.tipo = 'servicio'
+           OR EXISTS (
+             SELECT 1 FROM inventario i
+             WHERE i.producto_id = p.id AND i.stock_cantidad - i.stock_apartado > 0
+           )
+         )
          AND ($1::uuid[] IS NULL OR p.id = ANY($1::uuid[]))
        ORDER BY p.nombre`,
       [ids]
