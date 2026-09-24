@@ -30,9 +30,14 @@ router.get('/', verificarSecreto, async (req, res) => {
     return res.json({ id: u.id, nombre: u.nombre, rol: u.rol, telefono: u.telefono, sucursal_id: u.sucursal_id });
   }
 
+  // Coincide con el telefono principal O con el adicional. Dos clientes pueden
+  // compartir un numero (familiares): se prefiere el que lo tiene como principal
+  // y luego el mas antiguo, para que la respuesta no cambie de una llamada a otra.
   const cliente = await pool.query(
     `SELECT id, nombre, telefono, sucursal_id FROM clientes
      WHERE right(regexp_replace(telefono, '\\D', '', 'g'), 10) = $1
+        OR right(regexp_replace(telefono_adicional, '\\D', '', 'g'), 10) = $1
+     ORDER BY (right(regexp_replace(telefono, '\\D', '', 'g'), 10) = $1) DESC NULLS LAST, created_at ASC
      LIMIT 1`,
     [telefono]
   );

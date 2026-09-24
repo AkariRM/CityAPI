@@ -26,7 +26,7 @@ router.get('/', verificarSecreto, async (req, res) => {
   try {
     const { rows } = await pool.query(
       `SELECT p.id, p.sku, p.nombre, p.tipo, c.nombre AS categoria, p.marca, p.modelo,
-              p.almacenamiento, p.precio_venta, p.imagen_url,
+              p.almacenamiento, p.color, p.precio_venta, p.imagen_url,
               (SELECT u.condicion FROM unidades_imei u WHERE u.producto_id = p.id AND u.condicion IS NOT NULL LIMIT 1) AS condicion_unidad
        FROM productos p
        LEFT JOIN categorias c ON c.id = p.categoria_id
@@ -59,6 +59,9 @@ router.get('/', verificarSecreto, async (req, res) => {
           marca,
           modelo: p.modelo || p.nombre,
           almacenamiento_gb: extraerAlmacenamientoGb(p.almacenamiento) ?? extraerAlmacenamientoGb(p.nombre),
+          // Columna propia del producto (la llena el alta de equipos y el importador);
+          // null si no se capturo.
+          color: p.color || null,
           salud_bateria: extraerSaludBateria(p.condicion_unidad),
           precio_venta: p.precio_venta,
           imagen_url: p.imagen_url,

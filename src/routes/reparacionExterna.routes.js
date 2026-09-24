@@ -23,6 +23,10 @@ const ESTADO_EXTERNO = {
 // es una cotizacion sin confirmar y el agente tiene prohibido darla.
 const ESTADOS_CON_COSTO_AUTORIZADO = new Set(['reparacion', 'listo', 'entregado']);
 
+// La cotizacion (monto_cotizado / descripcion_cotizacion) solo se expone mientras
+// el cliente todavia no la autoriza; despues de eso el monto es costo_autorizado.
+const ESTADO_PARA_COTIZAR = 'esperando_autorizacion';
+
 // Solo tiene sentido hablar de "tiempo restante" mientras el equipo sigue en
 // manos del taller -- de "listo" en adelante ya no hay nada que esperar.
 const ESTADOS_CON_TIEMPO_RESTANTE = new Set(['recibido', 'diagnostico', 'esperando_autorizacion', 'reparacion']);
@@ -33,6 +37,13 @@ router.get('/', verificarSecreto, async (req, res) => {
   const { telefono, folio } = req.query;
   if (!telefono && !folio) {
     return res.status(400).json({ error: 'telefono o folio es requerido.' });
+  }
+  // Solo los ultimos 10 digitos cuentan. Un telefono sin digitos suficientes se
+  // rechaza: sin esto, "abc" se comparaba contra cadenas vacias y podia empatar
+  // con clientes sin telefono.
+  const telefono10 = telefono ? String(telefono).replace(/\D/g, '').slice(-10) : null;
+  if (telefono && telefono10.length !== 10) {
+    return res.status(400).json({ error: 'telefono inválido — manda el número completo (E.164 o 10 dígitos).' });
   }
 
   // Los telefonos guardados son a 10 digitos sin lada de pais (ej.
@@ -51,10 +62,12 @@ router.get('/', verificarSecreto, async (req, res) => {
      JOIN clientes c ON c.id = r.cliente_id
      JOIN sucursales s ON s.id = r.sucursal_id
      WHERE ($1::text IS NULL OR r.folio = $1)
-       AND ($2::text IS NULL OR RIGHT(regexp_replace(c.telefono, '\\D', '', 'g'), 10) = RIGHT(regexp_replace($2, '\\D', '', 'g'), 10))
+       AND ($2::text IS NULL
+            OR RIGHT(regexp_replace(c.telefono, '\\D', '', 'g'), 10) = $2
+            OR RIGHT(regexp_replace(c.telefono_adicional, '\\D', '', 'g'), 10) = $2)
        AND ($1::text IS NOT NULL OR r.estado NOT IN ('entregado', 'cancelado'))
      ORDER BY r.created_at DESC`,
-    [folio || null, telefono || null]
+    [folio || null, telefono10]
   );
 
   // Fotos del ESTADO ACTUAL de cada folio (una sola consulta para todos,
@@ -87,6 +100,12 @@ router.get('/', verificarSecreto, async (req, res) => {
       dias_restantes: ESTADOS_CON_TIEMPO_RESTANTE.has(r.estado) && r.dias_restantes != null ? Number(r.dias_restantes) : null,
       costo_autorizado: ESTADOS_CON_COSTO_AUTORIZADO.has(r.estado) ? Number(r.total) : null,
       requiere_autorizacion: r.estado === 'esperando_autorizacion',
+      // Total actual del folio, sin desglose. Null si todavia no hay monto (total en
+      // cero): en ese caso el agente no debe dar ninguna cifra.
+      monto_cotizado: r.estado === ESTADO_PARA_COTIZAR && Number(r.total) > 0 ? Number(r.total) : null,
+      // Sale de "Nota para el cliente" (texto que el personal escribe para el
+      // cliente, nunca notas internas). Null si esta vacia.
+      descripcion_cotizacion: r.estado === ESTADO_PARA_COTIZAR ? r.nota_para_cliente || null : null,
       sucursal: r.sucursal_nombre,
       nota_para_cliente: r.nota_para_cliente || null,
       fotos_estado_actual: fotosPorFolio.get(r.id) ?? [],
