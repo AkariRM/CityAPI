@@ -53,7 +53,10 @@ router.get('/', verificarSecreto, async (req, res) => {
     // adivinar el "modelo" exacto de la misma forma.
     res.json(
       rows.map((p) => {
-        const { marca, categoria } = derivarMarcaCategoria(p);
+        const { marca: marcaCruda, categoria } = derivarMarcaCategoria(p);
+        // Siempre en mayusculas: el formulario guarda la marca como se escribio ("Apple") y el
+        // importador/derivacion la dejan en mayusculas ("APPLE"); asi el agente ve una sola.
+        const marca = marcaCruda ? String(marcaCruda).trim().toUpperCase() || null : null;
         return {
           id: p.id,
           sku: p.sku,
