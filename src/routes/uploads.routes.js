@@ -6,7 +6,7 @@ const { subirBufferABucket, EXTENSIONES, detectarTipoReal } = require('../utils/
 const router = express.Router();
 // tecnico: sube las fotos de avance del folio de reparacion (ver
 // POST /reparaciones/:id/fotos).
-router.use(requireAuth, requireRole('admin', 'vendedor', 'pto', 'tecnico'));
+router.use(requireAuth, requireRole('admin', 'vendedor', 'pto', 'tecnico', 'supervisor_taller'));
 
 // El bucket es publico de LECTURA (fotos de catalogo, no hay nada sensible
 // que proteger); lo que si esta cerrado es la escritura — solo este

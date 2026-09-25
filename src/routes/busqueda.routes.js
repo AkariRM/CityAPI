@@ -1,6 +1,7 @@
 const express = require('express');
 const { pool } = require('../db');
 const { requireAuth, esAdminODueno } = require('../middleware/auth');
+const { alcanceReparaciones, esPersonalTaller } = require('../utils/alcanceReparaciones');
 
 const router = express.Router();
 router.use(requireAuth);
@@ -13,9 +14,11 @@ router.get('/', async (req, res) => {
   const { q, sucursal_id } = req.query;
   const termino = (q || '').trim();
   if (termino.length < 2) return res.json({ clientes: [], productos: [], reparaciones: [] });
-  // Admin y dueño pueden omitir sucursal_id (buscan en todas las sucursales);
-  // los demas roles lo siguen necesitando para las ordenes de taller.
-  if (!sucursal_id && !esAdminODueno(req.usuario.rol)) return res.status(400).json({ error: 'sucursal_id es requerido.' });
+  // Admin y dueño pueden omitir sucursal_id (buscan en todas las sucursales); el personal del taller
+  // no tiene sucursal (y no busca productos ni clientes); los demas lo siguen necesitando.
+  if (!sucursal_id && !esAdminODueno(req.usuario.rol) && !esPersonalTaller(req.usuario.rol)) {
+    return res.status(400).json({ error: 'sucursal_id es requerido.' });
+  }
 
   // El IMEI (completo o sus ultimos digitos, que es la referencia de la calcomania) tambien
   // encuentra el equipo: se compara solo con letras y numeros y desde 4 caracteres.
@@ -24,6 +27,10 @@ router.get('/', async (req, res) => {
 
   const rol = req.usuario.rol;
   const puedeVerClientesYReparaciones = esAdminODueno(rol) || rol === 'vendedor';
+  // El taller (tecnico y Supervisor del taller) solo busca reparaciones: sin catalogo ni clientes.
+  const puedeVerProductos = !esPersonalTaller(rol);
+  // Cada rol encuentra solo las reparaciones a su alcance (ver utils/alcanceReparaciones.js).
+  const alcance = alcanceReparaciones(req.usuario);
   const like = `%${termino}%`;
 
   const [clientes, productos, reparaciones] = await Promise.all([
@@ -33,7 +40,7 @@ router.get('/', async (req, res) => {
           [like]
         )
       : Promise.resolve({ rows: [] }),
-    pool.query(
+    !puedeVerProductos ? Promise.resolve({ rows: [] }) : pool.query(
       `SELECT p.id, p.nombre, p.tipo, p.precio_venta, um.imei AS imei_coincidencia
        FROM productos p
        LEFT JOIN LATERAL (
@@ -47,15 +54,15 @@ router.get('/', async (req, res) => {
        ORDER BY p.nombre LIMIT 5`,
       [like, qImei, sucursal_id || null]
     ),
-    puedeVerClientesYReparaciones || rol === 'tecnico'
+    !alcance.sinAcceso
       ? pool.query(
           `SELECT r.id, r.folio, r.estado, c.nombre AS cliente_nombre
            FROM reparaciones r JOIN clientes c ON c.id = r.cliente_id
            WHERE ($1::uuid IS NULL OR r.sucursal_id = $1::uuid) AND (r.folio ILIKE $2 OR c.nombre ILIKE $2)
              AND ($3::uuid IS NULL OR r.tecnico_id = $3::uuid)
+             AND ($4::uuid IS NULL OR r.sucursal_id = $4::uuid)
            ORDER BY r.created_at DESC LIMIT 5`,
-          // Un tecnico solo encuentra las reparaciones que tiene asignadas.
-          [sucursal_id || null, like, rol === 'tecnico' ? req.usuario.sub : null]
+          [sucursal_id || null, like, alcance.tecnicoId ?? null, alcance.sucursalId ?? null]
         )
       : Promise.resolve({ rows: [] }),
   ]);

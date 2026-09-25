@@ -263,7 +263,7 @@ router.post('/media/mejorar-imagen', requireRole('admin', 'vendedor', 'pto'), as
 });
 
 // 6 — Notificaciones al cliente (agente)
-router.post('/agente/notificar-cliente', requireRole('admin', 'vendedor', 'tecnico'), async (req, res) => {
+router.post('/agente/notificar-cliente', requireRole('admin', 'vendedor'), async (req, res) => {
   if (!validarEmpresa(req, res)) return;
   const faltan = faltantes(req.body, ['tipo_notificacion', 'cliente.nombre', 'cliente.telefono', 'referencia_id', 'mensaje']);
   if (faltan.length) return res.status(400).json({ error: `Faltan campos: ${faltan.join(', ')}.` });

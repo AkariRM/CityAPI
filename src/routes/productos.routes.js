@@ -12,7 +12,7 @@ router.use(requireAuth);
 // folio de reparacion, y el community manager para el catalogo de solo
 // lectura y para vincular equipos en Marketplace; las demas rutas (alta,
 // edicion, stock, IMEI) siguen restringidas a quienes administran el catalogo.
-router.get('/', requireRole('admin', 'vendedor', 'tecnico', 'community_manager'), async (req, res) => {
+router.get('/', requireRole('admin', 'vendedor', 'community_manager'), async (req, res) => {
   const { sucursal_id, q, categoria_id, tipo, cliente_id, activo } = req.query;
   // Admin y dueño pueden omitir sucursal_id (ven "Todas las sucursales" con
   // el stock sumado); los demas roles lo siguen necesitando, igual que siempre.
@@ -400,7 +400,7 @@ router.delete('/:id/unidades/:unidadId', requireRole('admin', 'vendedor'), async
 
 const MAX_IMAGENES_PRODUCTO = 10;
 
-router.get('/:id/imagenes', requireRole('admin', 'vendedor', 'tecnico', 'community_manager'), async (req, res) => {
+router.get('/:id/imagenes', requireRole('admin', 'vendedor', 'community_manager'), async (req, res) => {
   const { rows } = await pool.query(
     `SELECT id, imagen_url, es_principal, orden, created_at
      FROM producto_imagenes WHERE producto_id = $1 ORDER BY orden ASC, created_at ASC`,

@@ -19,7 +19,7 @@ async function requireAuth(req, res, next) {
 
   try {
     const { rows } = await pool.query(
-      `SELECT u.rol, u.activo, u.empresa_id, e.slug AS empresa_slug
+      `SELECT u.rol, u.activo, u.empresa_id, u.sucursal_id, e.slug AS empresa_slug
        FROM usuarios u LEFT JOIN empresas e ON e.id = u.empresa_id
        WHERE u.id = $1`,
       [payload.sub]
@@ -28,7 +28,9 @@ async function requireAuth(req, res, next) {
     if (!usuario || !usuario.activo) {
       return res.status(401).json({ error: 'Sesión inválida o expirada.' });
     }
-    req.usuario = { sub: payload.sub, rol: usuario.rol, empresa_id: usuario.empresa_id, empresa_slug: usuario.empresa_slug };
+    req.usuario = {
+      sub: payload.sub, rol: usuario.rol, empresa_id: usuario.empresa_id, empresa_slug: usuario.empresa_slug, sucursal_id: usuario.sucursal_id,
+    };
     next();
   } catch (err) {
     console.error(err);

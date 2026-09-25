@@ -1,6 +1,7 @@
 const express = require('express');
 const { pool } = require('../db');
 const { requireAuth, requireRole } = require('../middleware/auth');
+const { alcanceReparaciones } = require('../utils/alcanceReparaciones');
 const { obtenerConfiguracionTicket } = require('../utils/configuracionTicket');
 const { registrarMovimientoRefaccion } = require('../utils/movimientosRefacciones');
 
@@ -10,17 +11,27 @@ const router = express.Router();
 // VER el detalle de un folio, incluida su lista de solicitudes) -- las
 // acciones de escritura se restringen aparte, por ruta, igual que
 // reparaciones.routes.js excluye vendedor solo de /refacciones.
-router.use(requireAuth, requireRole('admin', 'tecnico', 'vendedor'));
+router.use(requireAuth, requireRole('admin', 'tecnico', 'vendedor', 'supervisor_taller'));
 
 const ESTADOS_VALIDOS = ['pendiente', 'aprobada', 'rechazada', 'recibida'];
 
-// Un tecnico solo maneja las solicitudes de pieza de SUS reparaciones (mismo criterio que
-// reparaciones.routes.js): devuelve su id para filtrar, o null si el rol ve todas.
-const idDelTecnico = (req) => (req.usuario.rol === 'tecnico' ? req.usuario.sub : null);
+// Cada rol ve las solicitudes de pieza de las reparaciones a su alcance (mismo criterio que
+// reparaciones.routes.js, ver utils/alcanceReparaciones.js): el tecnico las de SUS reparaciones, la
+// sucursal las de las que recibio, el taller (supervisor) y el dueño todas.
+function fueraDeAlcance(req, reparacion) {
+  const alcance = alcanceReparaciones(req.usuario);
+  return !!(
+    alcance.sinAcceso ||
+    (alcance.tecnicoId && reparacion.tecnico_id !== alcance.tecnicoId) ||
+    (alcance.sucursalId && reparacion.sucursal_id !== alcance.sucursalId)
+  );
+}
 
 router.get('/', async (req, res) => {
   const { estado, reparacion_id } = req.query;
   if (estado !== undefined && !ESTADOS_VALIDOS.includes(estado)) return res.status(400).json({ error: 'Estado inválido.' });
+  const alcance = alcanceReparaciones(req.usuario);
+  if (alcance.sinAcceso) return res.json([]);
 
   const { rows } = await pool.query(
     `SELECT sp.id, sp.reparacion_id, r.folio, r.sucursal_id, sp.producto_id, sp.refaccion_id, COALESCE(p.nombre, ref.nombre, sp.nombre_libre) AS producto_nombre, sp.nombre_libre, sp.descripcion_libre,
@@ -37,22 +48,25 @@ router.get('/', async (req, res) => {
      WHERE ($1::text IS NULL OR sp.estado::text = $1)
        AND ($2::uuid IS NULL OR sp.reparacion_id = $2::uuid)
        AND ($3::uuid IS NULL OR r.tecnico_id = $3::uuid)
+       AND ($4::uuid IS NULL OR r.sucursal_id = $4::uuid)
      ORDER BY sp.created_at DESC`,
-    [estado || null, reparacion_id || null, idDelTecnico(req)]
+    [estado || null, reparacion_id || null, alcance.tecnicoId ?? null, alcance.sucursalId ?? null]
   );
   res.json(rows);
 });
 
-router.post('/', requireRole('admin', 'tecnico'), async (req, res) => {
+router.post('/', requireRole('dueño', 'supervisor_taller', 'tecnico'), async (req, res) => {
   const { reparacion_id, producto_id, refaccion_id, nombre_libre, descripcion_libre, costo_estimado } = req.body ?? {};
   if (!reparacion_id) return res.status(400).json({ error: 'reparacion_id es requerido.' });
-  if (!producto_id && !refaccion_id && !nombre_libre?.trim()) {
+  // Las piezas se piden del inventario de refacciones o por nombre; el catalogo de accesorios no es del taller.
+  if (producto_id) return res.status(400).json({ error: 'Las piezas se toman del inventario de refacciones.' });
+  if (!refaccion_id && !nombre_libre?.trim()) {
     return res.status(400).json({ error: 'Escribe el nombre de la pieza.' });
   }
   if (!(Number(costo_estimado) >= 0)) return res.status(400).json({ error: 'costo_estimado debe ser un número mayor o igual a 0.' });
 
-  const reparacion = await pool.query(`SELECT id, tecnico_id FROM reparaciones WHERE id = $1`, [reparacion_id]);
-  if (!reparacion.rows[0] || (idDelTecnico(req) && reparacion.rows[0].tecnico_id !== idDelTecnico(req))) {
+  const reparacion = await pool.query(`SELECT id, tecnico_id, sucursal_id FROM reparaciones WHERE id = $1`, [reparacion_id]);
+  if (!reparacion.rows[0] || fueraDeAlcance(req, reparacion.rows[0])) {
     return res.status(404).json({ error: 'Reparación no encontrada.' });
   }
 
@@ -65,7 +79,7 @@ router.post('/', requireRole('admin', 'tecnico'), async (req, res) => {
   res.status(201).json(rows[0]);
 });
 
-router.patch('/:id/aprobar', requireRole('admin'), async (req, res) => {
+router.patch('/:id/aprobar', requireRole('dueño', 'supervisor_taller'), async (req, res) => {
   const { producto_id, refaccion_id, costo_aprobado } = req.body ?? {};
 
   const actual = await pool.query(`SELECT * FROM reparacion_solicitudes_pieza WHERE id = $1`, [req.params.id]);
@@ -95,7 +109,7 @@ router.patch('/:id/aprobar', requireRole('admin'), async (req, res) => {
   res.json(rows[0]);
 });
 
-router.patch('/:id/rechazar', requireRole('admin'), async (req, res) => {
+router.patch('/:id/rechazar', requireRole('dueño', 'supervisor_taller'), async (req, res) => {
   const { motivo } = req.body ?? {};
 
   const actual = await pool.query(`SELECT estado FROM reparacion_solicitudes_pieza WHERE id = $1`, [req.params.id]);
@@ -126,7 +140,7 @@ router.patch('/:id/rechazar', requireRole('admin'), async (req, res) => {
 // nombre_libre), esto la da de alta como refaccion real del catalogo antes
 // de vincularla, para que la proxima vez ya se pueda buscar en vez de
 // volver a describirla.
-router.post('/:id/recibir', requireRole('admin', 'tecnico'), async (req, res) => {
+router.post('/:id/recibir', requireRole('dueño', 'supervisor_taller', 'tecnico'), async (req, res) => {
   const { registrar_gasto, cantidad_comprada, crear_refaccion } = req.body ?? {};
   const actual = await pool.query(
     `SELECT sp.*, r.folio, r.sucursal_id, r.tecnico_id AS reparacion_tecnico_id
@@ -136,7 +150,7 @@ router.post('/:id/recibir', requireRole('admin', 'tecnico'), async (req, res) =>
     [req.params.id]
   );
   const solicitud = actual.rows[0];
-  if (!solicitud || (idDelTecnico(req) && solicitud.reparacion_tecnico_id !== idDelTecnico(req))) {
+  if (!solicitud || fueraDeAlcance(req, { tecnico_id: solicitud.reparacion_tecnico_id, sucursal_id: solicitud.sucursal_id })) {
     return res.status(404).json({ error: 'Solicitud no encontrada.' });
   }
   if (solicitud.estado !== 'aprobada') return res.status(409).json({ error: 'Solo se puede recibir una solicitud aprobada.' });
@@ -163,10 +177,10 @@ router.post('/:id/recibir', requireRole('admin', 'tecnico'), async (req, res) =>
     let refaccionRecienCreada = false;
     if (crear_refaccion) {
       const nueva = await client.query(
-        `INSERT INTO refacciones (sucursal_id, nombre, categoria, proveedor, costo, stock)
-         VALUES ($1, $2, $3, $4, $5, 0)
+        `INSERT INTO refacciones (nombre, categoria, proveedor, costo, stock)
+         VALUES ($1, $2, $3, $4, 0)
          RETURNING id`,
-        [solicitud.sucursal_id, crear_refaccion.nombre.trim(), crear_refaccion.categoria?.trim() || null, crear_refaccion.proveedor?.trim() || null, solicitud.costo_estimado]
+        [crear_refaccion.nombre.trim(), crear_refaccion.categoria?.trim() || null, crear_refaccion.proveedor?.trim() || null, solicitud.costo_estimado]
       );
       refaccionId = nueva.rows[0].id;
       refaccionRecienCreada = true;
@@ -193,12 +207,9 @@ router.post('/:id/recibir', requireRole('admin', 'tecnico'), async (req, res) =>
     }
 
     if (refaccionId && cantidadComprada > 1) {
-      const sobrante = await client.query(
-        `UPDATE refacciones SET stock = stock + $1, costo = $2 WHERE id = $3 RETURNING sucursal_id`,
-        [cantidadComprada - 1, solicitud.costo_estimado, refaccionId]
-      );
+      await client.query(`UPDATE refacciones SET stock = stock + $1, costo = $2 WHERE id = $3`, [cantidadComprada - 1, solicitud.costo_estimado, refaccionId]);
       await registrarMovimientoRefaccion(client, {
-        refaccionId, sucursalId: sobrante.rows[0].sucursal_id, tipo: 'entrada', cantidad: cantidadComprada - 1,
+        refaccionId, sucursalId: null, tipo: 'entrada', cantidad: cantidadComprada - 1,
         motivo: `Sobrante de pieza solicitada (folio ${solicitud.folio})`, usuarioId: req.usuario.sub,
       });
     }

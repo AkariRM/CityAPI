@@ -1,28 +1,34 @@
 const express = require('express');
 const { pool } = require('../db');
-const { requireAuth, requireRole, esAdminODueno } = require('../middleware/auth');
+const { requireAuth, requireRole } = require('../middleware/auth');
+const { alcanceReparaciones, esPersonalTaller } = require('../utils/alcanceReparaciones');
 const { inicioDiaUTC, finDiaUTCExclusivo } = require('../utils/fechas');
 const { obtenerConfiguracionTicket } = require('../utils/configuracionTicket');
 const { registrarMovimientoRefaccion } = require('../utils/movimientosRefacciones');
 
 const router = express.Router();
 
-router.use(requireAuth, requireRole('admin', 'tecnico', 'vendedor'));
+router.use(requireAuth, requireRole('admin', 'tecnico', 'vendedor', 'supervisor_taller'));
 
 const UUID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
 
-// Un tecnico solo ve las reparaciones que tiene asignadas (tecnico_id): admin/supervisor las
-// asignan y quitan, y el vendedor sigue viendo todas (recibe y entrega). Devuelve el id a filtrar,
-// o null si el rol ve todo.
-const idDelTecnico = (req) => (req.usuario.rol === 'tecnico' ? req.usuario.sub : null);
+// Taller compartido: cada rol ve solo lo suyo (ver utils/alcanceReparaciones.js). El vendedor y el
+// Supervisor de sucursal, las recibidas en su sucursal; el tecnico, las asignadas a el; el
+// Supervisor del taller y el dueño, todas.
+const idDelTecnico = (req) => alcanceReparaciones(req.usuario).tecnicoId ?? null;
 
-// Toda ruta con :id (detalle, notificaciones, refacciones, fotos, cambios...) pasa por aqui: si
-// la reparacion es de otro tecnico (o no tiene tecnico) responde 404, igual que si no existiera,
-// para no revelar que existe. Si no existe, la ruta misma responde su 404 de siempre.
+// Toda ruta con :id (detalle, notificaciones, refacciones, fotos, cambios...) pasa por aqui: si la
+// reparacion queda fuera del alcance del usuario responde 404, igual que si no existiera, para no
+// revelar que existe. Si no existe, la ruta misma responde su 404 de siempre.
 router.param('id', async (req, res, next, id) => {
-  if (req.usuario?.rol !== 'tecnico' || !UUID_RE.test(id)) return next();
-  const { rows } = await pool.query(`SELECT tecnico_id FROM reparaciones WHERE id = $1`, [id]);
-  if (rows[0] && rows[0].tecnico_id !== req.usuario.sub) return res.status(404).json({ error: 'Reparación no encontrada.' });
+  const alcance = alcanceReparaciones(req.usuario);
+  if (alcance.sinAcceso) return res.status(404).json({ error: 'Reparación no encontrada.' });
+  if ((!alcance.tecnicoId && !alcance.sucursalId) || !UUID_RE.test(id)) return next();
+  const { rows } = await pool.query(`SELECT tecnico_id, sucursal_id FROM reparaciones WHERE id = $1`, [id]);
+  const r = rows[0];
+  if (r && ((alcance.tecnicoId && r.tecnico_id !== alcance.tecnicoId) || (alcance.sucursalId && r.sucursal_id !== alcance.sucursalId))) {
+    return res.status(404).json({ error: 'Reparación no encontrada.' });
+  }
   next();
 });
 
@@ -32,7 +38,7 @@ const METODOS_PAGO_VALIDOS = ['efectivo', 'tarjeta'];
 
 // IMPORTANTE: esta ruta especifica va ANTES de "/:id" para que Express no la
 // confunda con una busqueda por id (que fallaria con "reporte" como uuid).
-router.get('/refacciones/reporte', async (req, res) => {
+router.get('/refacciones/reporte', requireRole('dueño', 'supervisor_taller', 'tecnico'), async (req, res) => {
   const { desde, hasta, sucursal_id } = req.query;
   const { rows } = await pool.query(
     `SELECT rr.id, r.folio, rr.producto_id, rr.refaccion_id, COALESCE(p.nombre, ref.nombre) AS producto_nombre, rr.cantidad, rr.costo, r.created_at AS fecha
@@ -54,7 +60,7 @@ router.get('/refacciones/reporte', async (req, res) => {
 // desempeño, como los reportes financieros). Agrupa por tecnico_id (incluye
 // NULL como "sin asignar"); dias_promedio se calcula de recepcion a la
 // primera vez que el folio paso por 'entregado' en el historial.
-router.get('/reporte-tecnicos', requireRole('admin'), async (req, res) => {
+router.get('/reporte-tecnicos', requireRole('dueño', 'supervisor_taller'), async (req, res) => {
   const { desde, hasta, sucursal_id } = req.query;
   const { rows } = await pool.query(
     `WITH entregas AS (
@@ -85,6 +91,8 @@ router.get('/reporte-tecnicos', requireRole('admin'), async (req, res) => {
 // Kanban los deja sin mandar y ve todo, igual que antes).
 router.get('/', async (req, res) => {
   const { estado, tecnico_id, sucursal_id, q, desde, hasta } = req.query;
+  const alcance = alcanceReparaciones(req.usuario);
+  if (alcance.sinAcceso) return res.json([]);
   const { rows } = await pool.query(
     `SELECT r.id, r.folio, r.cliente_id, c.nombre AS cliente_nombre, r.sucursal_id,
             r.equipo_marca, r.equipo_modelo, r.imei_equipo, r.problema_reportado, r.diagnostico,
@@ -103,8 +111,12 @@ router.get('/', async (req, res) => {
        AND ($5::timestamptz IS NULL OR r.created_at >= $5::timestamptz)
        AND ($6::timestamptz IS NULL OR r.created_at < $6::timestamptz)
        AND ($7::uuid IS NULL OR r.tecnico_id = $7::uuid)
+       AND ($8::uuid IS NULL OR r.sucursal_id = $8::uuid)
      ORDER BY r.created_at DESC`,
-    [estado || null, tecnico_id || null, sucursal_id || null, q || null, desde ? inicioDiaUTC(desde) : null, hasta ? finDiaUTCExclusivo(hasta) : null, idDelTecnico(req)]
+    [
+      estado || null, tecnico_id || null, sucursal_id || null, q || null, desde ? inicioDiaUTC(desde) : null, hasta ? finDiaUTCExclusivo(hasta) : null,
+      alcance.tecnicoId ?? null, alcance.sucursalId ?? null,
+    ]
   );
   res.json(rows);
 });
@@ -174,11 +186,18 @@ router.get('/:id', async (req, res) => {
   // comprobante sin necesitar ese permiso — mismo patron que POST /ventas.
   const configTicket = await obtenerConfiguracionTicket();
 
+  // El taller no trata con clientes ni con dinero: sin telefonos ni cobros (los avisos y el cobro los
+  // hace la sucursal que recibio el equipo).
+  if (esPersonalTaller(req.usuario.rol)) {
+    reparacion.cliente_telefono = null;
+    reparacion.cliente_telefono_adicional = null;
+  }
+
   res.json({
     ...reparacion,
     historial: historial.rows,
     refacciones: refacciones.rows,
-    abonos: abonos.rows,
+    abonos: esPersonalTaller(req.usuario.rol) ? [] : abonos.rows,
     fotos: fotos.rows,
     nombre_negocio: configTicket.nombre_negocio,
     mostrar_direccion: configTicket.mostrar_direccion,
@@ -189,7 +208,7 @@ router.get('/:id', async (req, res) => {
   });
 });
 
-router.post('/', requireRole('admin', 'vendedor', 'tecnico'), async (req, res) => {
+router.post('/', requireRole('admin', 'vendedor'), async (req, res) => {
   const {
     cliente_id, sucursal_id, telefono, telefono_adicional, equipo_marca, equipo_modelo, imei_equipo, equipo_contrasena, problema_reportado, prioridad,
     equipo_enciende, origen_reparacion, producto_id, unidad_imei_id,
@@ -197,6 +216,10 @@ router.post('/', requireRole('admin', 'vendedor', 'tecnico'), async (req, res) =
 
   const esCompraPropia = origen_reparacion === 'compra_propia';
   if (!sucursal_id) return res.status(400).json({ error: 'sucursal_id es requerido.' });
+  // El equipo se recibe en la sucursal de quien lo recibe (el dueño puede en cualquiera).
+  if (req.usuario.rol !== 'dueño' && sucursal_id !== req.usuario.sucursal_id) {
+    return res.status(403).json({ error: 'Solo puedes recibir equipos en tu propia sucursal.' });
+  }
   if (esCompraPropia) {
     if (!producto_id) return res.status(400).json({ error: 'producto_id es requerido cuando origen_reparacion es "compra_propia".' });
   } else {
@@ -231,16 +254,14 @@ router.post('/', requireRole('admin', 'vendedor', 'tecnico'), async (req, res) =
     }
 
     const reparacion = await client.query(
-      `INSERT INTO reparaciones (cliente_id, sucursal_id, equipo_marca, equipo_modelo, imei_equipo, equipo_contrasena, problema_reportado, prioridad, origen_reparacion, producto_id, unidad_imei_id, equipo_enciende, tecnico_id)
-       VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13)
+      `INSERT INTO reparaciones (cliente_id, sucursal_id, equipo_marca, equipo_modelo, imei_equipo, equipo_contrasena, problema_reportado, prioridad, origen_reparacion, producto_id, unidad_imei_id, equipo_enciende)
+       VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12)
        RETURNING id, folio, estado, created_at`,
       [
         esCompraPropia ? null : cliente_id, sucursal_id, equipo_marca || null, equipo_modelo || null, imei_equipo || null,
         equipo_contrasena || null, problema_reportado.trim(), prioridadFinal,
         esCompraPropia ? 'compra_propia' : 'cliente', producto_id || null, unidad_imei_id || null,
         typeof equipo_enciende === 'boolean' ? equipo_enciende : null,
-        // Si lo recibe un tecnico, queda asignado a el; en los demas casos lo asigna el admin/supervisor.
-        idDelTecnico(req),
       ]
     );
 
@@ -266,11 +287,11 @@ router.patch('/:id', async (req, res) => {
   const actual = actualResult.rows[0];
   if (!actual) return res.status(404).json({ error: 'Reparación no encontrada.' });
 
-  // Asignar o quitar el tecnico es cosa del admin/supervisor: el resto puede mandar el mismo valor
-  // que ya tiene (la app lo reenvia al guardar) pero no cambiarlo.
+  // Asignar o quitar el tecnico es cosa del Administrador o del Supervisor del taller: el resto puede
+  // mandar el mismo valor que ya tiene (la app lo reenvia al guardar) pero no cambiarlo.
   if (req.body?.tecnico_id !== undefined && req.body.tecnico_id !== actual.tecnico_id) {
-    if (!esAdminODueno(req.usuario.rol)) {
-      return res.status(403).json({ error: 'Solo el administrador o supervisor puede asignar o quitar el técnico.' });
+    if (req.usuario.rol !== 'dueño' && req.usuario.rol !== 'supervisor_taller') {
+      return res.status(403).json({ error: 'Solo el administrador o el supervisor del taller puede asignar o quitar el técnico.' });
     }
     if (req.body.tecnico_id !== null) {
       const tecnico = UUID_RE.test(String(req.body.tecnico_id))
@@ -396,7 +417,7 @@ const CANALES_VALIDOS = ['whatsapp'];
 // bitacora de que el vendedor/tecnico ya avisó al cliente por su cuenta
 // (llamada, WhatsApp personal, etc.), no un envio automatico. Por eso se
 // guarda directo como 'enviado' con enviado_at = ahora, no 'pendiente'.
-router.get('/:id/notificaciones', async (req, res) => {
+router.get('/:id/notificaciones', requireRole('admin', 'vendedor'), async (req, res) => {
   const { rows } = await pool.query(
     `SELECT id, canal, mensaje, estado, enviado_at, created_at
      FROM notificaciones_cliente
@@ -407,7 +428,7 @@ router.get('/:id/notificaciones', async (req, res) => {
   res.json(rows);
 });
 
-router.post('/:id/notificaciones', async (req, res) => {
+router.post('/:id/notificaciones', requireRole('admin', 'vendedor'), async (req, res) => {
   const { canal, mensaje } = req.body ?? {};
   if (!CANALES_VALIDOS.includes(canal)) return res.status(400).json({ error: 'Canal inválido.' });
   if (!mensaje?.trim()) return res.status(400).json({ error: 'El mensaje es requerido.' });
@@ -424,12 +445,14 @@ router.post('/:id/notificaciones', async (req, res) => {
   res.status(201).json(rows[0]);
 });
 
-router.post('/:id/refacciones', requireRole('admin', 'tecnico'), async (req, res) => {
+router.post('/:id/refacciones', requireRole('dueño', 'supervisor_taller', 'tecnico'), async (req, res) => {
   const { producto_id, refaccion_id, cantidad, costo } = req.body ?? {};
-  if (!producto_id && !refaccion_id) return res.status(400).json({ error: 'producto_id o refaccion_id es requerido.' });
+  // El taller solo usa el inventario de refacciones, no el catalogo de accesorios de venta.
+  if (producto_id) return res.status(400).json({ error: 'Las piezas se toman del inventario de refacciones.' });
+  if (!refaccion_id) return res.status(400).json({ error: 'refaccion_id es requerido.' });
   const cant = Number(cantidad) || 1;
 
-  const reparacionResult = await pool.query(`SELECT sucursal_id, folio FROM reparaciones WHERE id = $1`, [req.params.id]);
+  const reparacionResult = await pool.query(`SELECT folio FROM reparaciones WHERE id = $1`, [req.params.id]);
   const reparacion = reparacionResult.rows[0];
   if (!reparacion) return res.status(404).json({ error: 'Reparación no encontrada.' });
 
@@ -437,50 +460,25 @@ router.post('/:id/refacciones', requireRole('admin', 'tecnico'), async (req, res
   try {
     await client.query('BEGIN');
 
-    let costoFinal;
-    if (refaccion_id) {
-      // Inventario dedicado de refacciones -- no pasa por inventario/
-      // movimientos_inventario, esas tablas son solo de productos.
-      const stockResult = await client.query(`SELECT stock, nombre, costo, sucursal_id FROM refacciones WHERE id = $1 FOR UPDATE`, [refaccion_id]);
-      const stockRow = stockResult.rows[0];
-      if (!stockRow || stockRow.stock < cant) {
-        throw Object.assign(new Error(`Stock insuficiente para "${stockRow?.nombre ?? refaccion_id}".`), { statusCode: 409 });
-      }
-      costoFinal = costo !== undefined ? Number(costo) : cant * Number(stockRow.costo);
-      await client.query(`UPDATE refacciones SET stock = stock - $1 WHERE id = $2`, [cant, refaccion_id]);
-      await registrarMovimientoRefaccion(client, {
-        refaccionId: refaccion_id, sucursalId: stockRow.sucursal_id, tipo: 'salida', cantidad: cant,
-        motivo: `Usada en reparación ${reparacion.folio}`, usuarioId: req.usuario.sub,
-      });
-    } else {
-      const stockResult = await client.query(
-        `SELECT stock_cantidad, p.nombre, p.precio_venta
-         FROM inventario i JOIN productos p ON p.id = i.producto_id
-         WHERE i.producto_id = $1 AND i.sucursal_id = $2 FOR UPDATE`,
-        [producto_id, reparacion.sucursal_id]
-      );
-      const stockRow = stockResult.rows[0];
-      if (!stockRow || stockRow.stock_cantidad < cant) {
-        throw Object.assign(new Error(`Stock insuficiente para "${stockRow?.nombre ?? producto_id}".`), { statusCode: 409 });
-      }
-      costoFinal = costo !== undefined ? Number(costo) : cant * Number(stockRow.precio_venta);
-
-      await client.query(
-        `UPDATE inventario SET stock_cantidad = stock_cantidad - $1, updated_at = now() WHERE producto_id = $2 AND sucursal_id = $3`,
-        [cant, producto_id, reparacion.sucursal_id]
-      );
-      await client.query(
-        `INSERT INTO movimientos_inventario (producto_id, sucursal_id, tipo, cantidad, motivo, referencia_tipo, referencia_id, usuario_id)
-         VALUES ($1, $2, 'salida', $3, 'Refacción usada en reparación', 'reparacion', $4, $5)`,
-        [producto_id, reparacion.sucursal_id, cant, req.params.id, req.usuario.sub]
-      );
+    // Inventario UNICO de refacciones del taller -- no pasa por inventario/movimientos_inventario
+    // (esas tablas son solo de productos).
+    const stockResult = await client.query(`SELECT stock, nombre, costo FROM refacciones WHERE id = $1 FOR UPDATE`, [refaccion_id]);
+    const stockRow = stockResult.rows[0];
+    if (!stockRow || stockRow.stock < cant) {
+      throw Object.assign(new Error(`Stock insuficiente para "${stockRow?.nombre ?? refaccion_id}".`), { statusCode: 409 });
     }
+    const costoFinal = costo !== undefined ? Number(costo) : cant * Number(stockRow.costo);
+    await client.query(`UPDATE refacciones SET stock = stock - $1 WHERE id = $2`, [cant, refaccion_id]);
+    await registrarMovimientoRefaccion(client, {
+      refaccionId: refaccion_id, sucursalId: null, tipo: 'salida', cantidad: cant,
+      motivo: `Usada en reparación ${reparacion.folio}`, usuarioId: req.usuario.sub,
+    });
 
     const refaccion = await client.query(
       `INSERT INTO reparacion_refacciones (reparacion_id, producto_id, refaccion_id, cantidad, costo)
        VALUES ($1, $2, $3, $4, $5)
        RETURNING id, producto_id, refaccion_id, cantidad, costo`,
-      [req.params.id, producto_id || null, refaccion_id || null, cant, costoFinal]
+      [req.params.id, null, refaccion_id, cant, costoFinal]
     );
 
     const sumaResult = await client.query(

@@ -4,12 +4,14 @@ const { requireAuth, requireRole } = require('../middleware/auth');
 const { isValidPin, hashPin } = require('../utils/pin');
 
 const router = express.Router();
-const ROLES_VALIDOS = ['dueño', 'admin', 'vendedor', 'tecnico', 'community_manager', 'pto'];
+const ROLES_VALIDOS = ['dueño', 'admin', 'vendedor', 'tecnico', 'community_manager', 'pto', 'supervisor_taller'];
+// Personal del taller de reparacion (compartido por todas las sucursales): no lleva sucursal.
+const ROLES_DEL_TALLER = ['tecnico', 'supervisor_taller'];
 // Roles que solo existen en CityPhone y siempre necesitan sucursal — 'admin'
 // (Supervisor) no entra aqui porque tambien puede ser de Áurea (via su propio
 // empresa_id), y Áurea no tiene sucursales todavia (fase 1); en ese caso se
 // resuelve abajo comparando contra la empresa real del usuario.
-const ROLES_CITYPHONE_CON_SUCURSAL = ['vendedor', 'tecnico', 'community_manager'];
+const ROLES_CITYPHONE_CON_SUCURSAL = ['vendedor', 'community_manager'];
 
 router.use(requireAuth, requireRole('dueño', 'admin'));
 
@@ -45,6 +47,11 @@ router.post('/', async (req, res) => {
     return res.status(403).json({ error: 'Solo el Dueño puede crear cuentas de Dueño o Admin.' });
   }
 
+  // Las cuentas del taller (tecnico, supervisor del taller) tambien las da de alta solo el Dueño.
+  if (ROLES_DEL_TALLER.includes(rol) && req.usuario.rol !== 'dueño') {
+    return res.status(403).json({ error: 'Solo el Dueño puede crear cuentas del taller.' });
+  }
+
   if (rol !== 'dueño' && !empresa_id) {
     return res.status(400).json({ error: 'La empresa es requerida.' });
   }
@@ -53,6 +60,9 @@ router.post('/', async (req, res) => {
   if (empresa_id) {
     const { rows } = await pool.query('SELECT slug FROM empresas WHERE id = $1', [empresa_id]);
     empresaSlug = rows[0]?.slug ?? null;
+  }
+  if (ROLES_DEL_TALLER.includes(rol) && empresaSlug !== 'cityphone') {
+    return res.status(400).json({ error: 'El taller de reparación es de CityPhone.' });
   }
   // 'admin' necesita sucursal solo cuando es de CityPhone — el mismo rol
   // tambien sirve como Supervisor de Áurea, que no tiene sucursales.
@@ -65,7 +75,8 @@ router.post('/', async (req, res) => {
     `INSERT INTO usuarios (nombre, telefono, email, rol, sucursal_id, empresa_id, pin_hash)
      VALUES ($1, $2, $3, $4, $5, $6, $7)
      RETURNING id, nombre, telefono, email, rol, sucursal_id, empresa_id, activo, created_at`,
-    [nombre.trim(), telefono || null, email || null, rol, rol === 'dueño' ? null : sucursal_id || null, rol === 'dueño' ? null : empresa_id, hashPin(pin)]
+    // Dueño y personal del taller no llevan sucursal (el taller es uno solo, compartido).
+    [nombre.trim(), telefono || null, email || null, rol, rol === 'dueño' || ROLES_DEL_TALLER.includes(rol) ? null : sucursal_id || null, rol === 'dueño' ? null : empresa_id, hashPin(pin)]
   );
   res.status(201).json(rows[0]);
 });
@@ -76,8 +87,21 @@ router.patch('/:id', async (req, res) => {
   if (rol && (rol === 'dueño' || rol === 'admin') && req.usuario.rol !== 'dueño') {
     return res.status(403).json({ error: 'Solo el Dueño puede asignar Dueño o Admin.' });
   }
+  if (rol && ROLES_DEL_TALLER.includes(rol) && req.usuario.rol !== 'dueño') {
+    return res.status(403).json({ error: 'Solo el Dueño puede asignar cuentas del taller.' });
+  }
 
-  const fields = { nombre, telefono, email, rol, sucursal_id, empresa_id, activo };
+  const actual = (await pool.query('SELECT rol, sucursal_id FROM usuarios WHERE id = $1', [req.params.id])).rows[0];
+  if (!actual) return res.status(404).json({ error: 'Usuario no encontrado.' });
+  const rolFinal = rol ?? actual.rol;
+  // El personal del taller nunca lleva sucursal (aunque llegue una en la peticion).
+  const sucursalFinal = ROLES_DEL_TALLER.includes(rolFinal) ? null : sucursal_id;
+  // Al pasar a un rol que necesita sucursal (ej. de tecnico a vendedor) hay que indicarla.
+  if (rol && rol !== actual.rol && ROLES_CITYPHONE_CON_SUCURSAL.includes(rol) && !(sucursal_id ?? actual.sucursal_id)) {
+    return res.status(400).json({ error: 'La sucursal es requerida.' });
+  }
+
+  const fields = { nombre, telefono, email, rol, sucursal_id: sucursalFinal, empresa_id, activo };
   const sets = [];
   const values = [];
   let i = 1;

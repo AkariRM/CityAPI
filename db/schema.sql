@@ -34,7 +34,10 @@ $$ LANGUAGE plpgsql;
 -- diferencia de 'admin', que queda asignado a una sola vía usuarios.empresa_id).
 -- 'pto' (Punto de Venta/Operador) es exclusivo de Áurea — vendedor+técnico
 -- de CityPhone no aplican ahí, es un rol operativo mucho más simple.
-CREATE TYPE rol_usuario AS ENUM ('dueño', 'admin', 'vendedor', 'tecnico', 'community_manager', 'pto');
+-- 'supervisor_taller': supervisa el taller de reparacion compartido por todas las sucursales (asigna
+-- tecnicos, aprueba piezas, administra refacciones); sin sucursal y sin acceso a ventas, caja ni
+-- finanzas. 'tecnico' tambien es del taller y no lleva sucursal (ver migracion_taller_compartido.sql).
+CREATE TYPE rol_usuario AS ENUM ('dueño', 'admin', 'vendedor', 'tecnico', 'community_manager', 'pto', 'supervisor_taller');
 CREATE TYPE metodo_pago AS ENUM ('efectivo', 'tarjeta', 'credito');
 CREATE TYPE estado_venta AS ENUM ('completada', 'cancelada');
 CREATE TYPE tipo_producto AS ENUM ('nuevo', 'usado', 'accesorio', 'servicio');
@@ -569,11 +572,11 @@ CREATE INDEX idx_reparaciones_sucursal ON reparaciones(sucursal_id);
 -- Inventario de refacciones, separado del catalogo de productos/accesorios
 -- (pedido explicito del negocio: su propia pantalla, su propia tabla). Sin
 -- folio ni IMEI ni galeria -- es un almacen de piezas, no un catalogo de
--- venta. sucursal_id NOT NULL porque una pieza fisica siempre vive en un
--- local especifico (igual que unidades_imei).
+-- venta. Es UN SOLO inventario, el del taller compartido por todas las sucursales: sucursal_id
+-- ya no se usa (queda NULL; la columna se conserva por historial).
 CREATE TABLE refacciones (
   id            uuid PRIMARY KEY DEFAULT gen_random_uuid(),
-  sucursal_id   uuid NOT NULL REFERENCES sucursales(id),
+  sucursal_id   uuid REFERENCES sucursales(id),
   nombre        text NOT NULL,
   categoria     text,
   proveedor     text,
@@ -592,7 +595,8 @@ CREATE INDEX idx_refacciones_sucursal ON refacciones(sucursal_id);
 CREATE TABLE movimientos_refacciones (
   id            uuid PRIMARY KEY DEFAULT gen_random_uuid(),
   refaccion_id  uuid NOT NULL REFERENCES refacciones(id),
-  sucursal_id   uuid NOT NULL REFERENCES sucursales(id),
+  -- Solo los movimientos anteriores al taller compartido la traen; los nuevos quedan en NULL.
+  sucursal_id   uuid REFERENCES sucursales(id),
   tipo          tipo_movimiento_inventario NOT NULL,
   cantidad      integer NOT NULL,
   motivo        text,

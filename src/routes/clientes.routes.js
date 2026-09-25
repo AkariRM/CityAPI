@@ -6,7 +6,7 @@ const { liberarApartadosVencidos } = require('../utils/apartados');
 
 const router = express.Router();
 
-router.use(requireAuth, requireRole('admin', 'vendedor', 'tecnico'));
+router.use(requireAuth, requireRole('admin', 'vendedor'));
 
 const TIPOS_PRECIO_VALIDOS = ['publico', 'revendedor', 'mayoreo'];
 // Campos de politica de credito -- solo Admin/Dueño puede autorizarlos o

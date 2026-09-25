@@ -10,7 +10,7 @@ const router = express.Router();
 const MAX_INTENTOS = 5;
 const BLOQUEO_MS = 15 * 60 * 1000;
 
-const ROLES_VALIDOS = ['dueño', 'admin', 'vendedor', 'tecnico', 'community_manager', 'pto'];
+const ROLES_VALIDOS = ['dueño', 'admin', 'vendedor', 'tecnico', 'community_manager', 'pto', 'supervisor_taller'];
 const UUID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
 
 // Un equipo con sucursal fija (Configuracion) solo deja entrar a usuarios de
