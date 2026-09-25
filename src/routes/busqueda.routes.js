@@ -17,6 +17,11 @@ router.get('/', async (req, res) => {
   // los demas roles lo siguen necesitando para las ordenes de taller.
   if (!sucursal_id && !esAdminODueno(req.usuario.rol)) return res.status(400).json({ error: 'sucursal_id es requerido.' });
 
+  // El IMEI (completo o sus ultimos digitos, que es la referencia de la calcomania) tambien
+  // encuentra el equipo: se compara solo con letras y numeros y desde 4 caracteres.
+  const qCodigo = termino.toUpperCase().replace(/[^0-9A-Z]/g, '');
+  const qImei = qCodigo.length >= 4 ? qCodigo : null;
+
   const rol = req.usuario.rol;
   const puedeVerClientesYReparaciones = esAdminODueno(rol) || rol === 'vendedor';
   const like = `%${termino}%`;
@@ -29,16 +34,28 @@ router.get('/', async (req, res) => {
         )
       : Promise.resolve({ rows: [] }),
     pool.query(
-      `SELECT id, nombre, tipo, precio_venta FROM productos WHERE activo = true AND nombre ILIKE $1 ORDER BY nombre LIMIT 5`,
-      [like]
+      `SELECT p.id, p.nombre, p.tipo, p.precio_venta, um.imei AS imei_coincidencia
+       FROM productos p
+       LEFT JOIN LATERAL (
+         SELECT ux.imei FROM unidades_imei ux
+         WHERE $2::text IS NOT NULL AND ux.producto_id = p.id
+           AND ($3::uuid IS NULL OR ux.sucursal_id = $3::uuid)
+           AND right(regexp_replace(upper(ux.imei), '[^0-9A-Z]', '', 'g'), length($2::text)) = $2::text
+         ORDER BY (ux.estado = 'disponible') DESC, ux.created_at DESC LIMIT 1
+       ) um ON true
+       WHERE p.activo = true AND (p.nombre ILIKE $1 OR p.sku ILIKE $1 OR um.imei IS NOT NULL)
+       ORDER BY p.nombre LIMIT 5`,
+      [like, qImei, sucursal_id || null]
     ),
     puedeVerClientesYReparaciones || rol === 'tecnico'
       ? pool.query(
           `SELECT r.id, r.folio, r.estado, c.nombre AS cliente_nombre
            FROM reparaciones r JOIN clientes c ON c.id = r.cliente_id
            WHERE ($1::uuid IS NULL OR r.sucursal_id = $1::uuid) AND (r.folio ILIKE $2 OR c.nombre ILIKE $2)
+             AND ($3::uuid IS NULL OR r.tecnico_id = $3::uuid)
            ORDER BY r.created_at DESC LIMIT 5`,
-          [sucursal_id || null, like]
+          // Un tecnico solo encuentra las reparaciones que tiene asignadas.
+          [sucursal_id || null, like, rol === 'tecnico' ? req.usuario.sub : null]
         )
       : Promise.resolve({ rows: [] }),
   ]);

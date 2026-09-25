@@ -74,6 +74,7 @@ estatus AS (
            CASE WHEN e.nombre_norm ~ '(^|[^A-Z0-9])AT&T($|[^A-Z0-9])' THEN 'AT&T' END,
            CASE WHEN e.nombre_norm ~ '(^|[^A-Z0-9])MDM($|[^A-Z0-9])' THEN 'MDM' END,
            CASE WHEN e.nombre_norm ~ '(^|[^A-Z0-9])MEP($|[^A-Z0-9])' THEN 'MEP' END,
+           CASE WHEN e.nombre_norm ~ '(^|[^A-Z0-9])R-?SIM($|[^A-Z0-9])' THEN 'RSIM' END,
            CASE WHEN e.nombre_norm ~ '(^|[^A-Z0-9])TELCEL($|[^A-Z0-9])' THEN 'TELCEL' END,
            CASE WHEN e.nombre_norm ~ '(^|[^A-Z0-9])MOVISTAR($|[^A-Z0-9])' THEN 'MOVISTAR' END
          ], NULL) AS lista

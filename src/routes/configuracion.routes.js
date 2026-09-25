@@ -14,6 +14,9 @@ const LIMITES_AGENTE = {
   agente_apartado_max_por_telefono: { min: 1, max: 10, texto: 'El máximo de apartados por teléfono' },
 };
 
+// Codigo que puede llevar la calcomania de equipo (igual que el CHECK de la tabla).
+const CODIGOS_CALCOMANIA = ['barras', 'qr'];
+
 // Cualquier rol autenticado puede LEER la configuracion (Equipos la
 // necesita para saber si debe auto-imprimir el sticker al dar de alta un
 // equipo, sin importar que rol lo esta registrando) -- solo modificarla
@@ -39,7 +42,11 @@ router.patch('/', requireRole('admin'), async (req, res) => {
     pieza_externa_requiere_catalogo: req.body?.pieza_externa_requiere_catalogo,
     agente_apartado_horas: req.body?.agente_apartado_horas,
     agente_apartado_max_por_telefono: req.body?.agente_apartado_max_por_telefono,
+    calcomania_equipo_codigo: req.body?.calcomania_equipo_codigo,
   };
+  if (fields.calcomania_equipo_codigo !== undefined && !CODIGOS_CALCOMANIA.includes(fields.calcomania_equipo_codigo)) {
+    return res.status(400).json({ error: "El código de la calcomanía debe ser 'barras' o 'qr'." });
+  }
   for (const [campo, { min, max, texto }] of Object.entries(LIMITES_AGENTE)) {
     const v = fields[campo];
     if (v !== undefined && !(Number.isInteger(v) && v >= min && v <= max)) {

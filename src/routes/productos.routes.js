@@ -24,6 +24,15 @@ router.get('/', requireRole('admin', 'vendedor', 'tecnico', 'community_manager')
   // Apartados del agente vencidos: se liberan antes de leer el stock apartado.
   await liberarApartadosVencidos(pool);
 
+  // Lo escrito (o leido con el lector de codigo de barras) tambien busca por IMEI: el IMEI
+  // completo o su referencia (los ultimos digitos, que es lo que trae la calcomania), o sea, el
+  // IMEI TERMINA en lo buscado. Se compara solo con letras y numeros (sin espacios ni guiones) y
+  // desde 4 caracteres, para que "128" o "11" no traigan medio inventario.
+  const qCodigo = q ? String(q).toUpperCase().replace(/[^0-9A-Z]/g, '') : '';
+  const qImei = qCodigo.length >= 4 ? qCodigo : null;
+  // La referencia de un equipo sin IMEI es el inicio de su id (8 caracteres hexadecimales).
+  const qIdInicio = /^[0-9A-F]{8}$/.test(qCodigo) ? qCodigo.toLowerCase() : null;
+
   // precio_venta ya viene resuelto (precio especial del cliente > precio
   // especial del rol del usuario que consulta > precio de lista), para que
   // el catálogo del Punto de Venta y el precio cobrado en /ventas coincidan
@@ -38,7 +47,9 @@ router.get('/', requireRole('admin', 'vendedor', 'tecnico', 'community_manager')
             p.imagen_url, p.categoria_id, c.nombre AS categoria_nombre,
             p.proveedor_id, pv.nombre AS proveedor_nombre,
             COALESCE(i.stock_cantidad, 0) AS stock, COALESCE(i.stock_minimo, 0) AS stock_minimo,
-            COALESCE(i.stock_apartado, 0) AS stock_apartado
+            COALESCE(i.stock_apartado, 0) AS stock_apartado,
+            um.imei AS imei_coincidencia, um.estado AS imei_coincidencia_estado,
+            COALESCE(um.n, 0) AS imei_coincidencias
      FROM productos p
      LEFT JOIN categorias c ON c.id = p.categoria_id
      LEFT JOIN proveedores pv ON pv.id = p.proveedor_id
@@ -47,14 +58,24 @@ router.get('/', requireRole('admin', 'vendedor', 'tecnico', 'community_manager')
        FROM inventario inv
        WHERE inv.producto_id = p.id AND ($1::uuid IS NULL OR inv.sucursal_id = $1::uuid)
      ) i ON true
+     LEFT JOIN LATERAL (
+       SELECT count(*)::int AS n,
+              (array_agg(ux.imei ORDER BY (ux.estado = 'disponible') DESC, ux.created_at DESC))[1] AS imei,
+              (array_agg(ux.estado::text ORDER BY (ux.estado = 'disponible') DESC, ux.created_at DESC))[1] AS estado
+       FROM unidades_imei ux
+       WHERE $8::text IS NOT NULL AND ux.producto_id = p.id
+         AND ($1::uuid IS NULL OR ux.sucursal_id = $1::uuid)
+         AND right(regexp_replace(upper(ux.imei), '[^0-9A-Z]', '', 'g'), length($8::text)) = $8::text
+     ) um ON true
      LEFT JOIN precios_especiales pe_cliente ON pe_cliente.producto_id = p.id AND pe_cliente.cliente_id = $5::uuid
      LEFT JOIN precios_especiales pe_rol ON pe_rol.producto_id = p.id AND pe_rol.rol = $6::rol_usuario
      WHERE p.activo = $7::boolean
        AND ($2::uuid IS NULL OR p.categoria_id = $2::uuid)
-       AND ($3::text IS NULL OR p.nombre ILIKE '%' || $3 || '%')
+       AND ($3::text IS NULL OR p.nombre ILIKE '%' || $3 || '%' OR p.sku ILIKE '%' || $3 || '%'
+            OR um.n > 0 OR ($9::text IS NOT NULL AND p.id::text LIKE ($9::text || '%')))
        AND ($4::text[] IS NULL OR p.tipo::text = ANY($4::text[]))
      ORDER BY p.nombre`,
-    [sucursal_id || null, categoria_id || null, q || null, tipos, cliente_id || null, req.usuario.rol, activoFiltro]
+    [sucursal_id || null, categoria_id || null, q || null, tipos, cliente_id || null, req.usuario.rol, activoFiltro, qImei, qIdInicio]
   );
   res.json(rows);
 });
@@ -501,6 +522,8 @@ router.delete('/:id/imagenes/:imagenId', requireRole('admin', 'vendedor'), async
 // item vive en su propia transaccion — a la escala de un historial de
 // compras real (cientos/miles de filas) no tiene sentido que una sola fila
 // con problema (ej. IMEI duplicado) tumbe a todas las demas del lote.
+const UUID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
+
 router.post('/importar-lote', requireRole('admin', 'vendedor'), async (req, res) => {
   const { sucursal_id, tipo, items } = req.body ?? {};
   if (!sucursal_id) return res.status(400).json({ error: 'sucursal_id es requerido.' });
@@ -520,8 +543,8 @@ router.post('/importar-lote', requireRole('admin', 'vendedor'), async (req, res)
       if (!item.nombre?.trim()) throw Object.assign(new Error('Nombre vacío.'), { statusCode: 400 });
 
       const producto = await client.query(
-        `INSERT INTO productos (nombre, descripcion, marca, modelo, color, almacenamiento, tipo, usa_imei, precio_venta, costo, precio_mayoreo, precio_revendedor)
-         VALUES ($1, $2, $3, $4, $5, $6, $7, true, $8, $9, $10, $11)
+        `INSERT INTO productos (nombre, descripcion, marca, modelo, color, almacenamiento, tipo, usa_imei, precio_venta, costo, precio_mayoreo, precio_revendedor, proveedor_id)
+         VALUES ($1, $2, $3, $4, $5, $6, $7, true, $8, $9, $10, $11, $12)
          RETURNING id`,
         [
           item.nombre.trim(),
@@ -535,6 +558,8 @@ router.post('/importar-lote', requireRole('admin', 'vendedor'), async (req, res)
           Number(item.costo) || 0,
           item.precio_mayoreo != null ? Number(item.precio_mayoreo) : null,
           item.precio_revendedor != null ? Number(item.precio_revendedor) : null,
+          // Proveedor del equipo (el Excel trae la columna PROVEDOR y la app ya lo resolvio a un id).
+          UUID_RE.test(String(item.proveedor_id ?? '')) ? item.proveedor_id : null,
         ]
       );
       const productoId = producto.rows[0].id;
@@ -561,7 +586,8 @@ router.post('/importar-lote', requireRole('admin', 'vendedor'), async (req, res)
       creados += 1;
     } catch (err) {
       await client.query('ROLLBACK');
-      const mensaje = err.code === '23505' ? 'Ese IMEI ya está registrado.' : err.message ?? 'Error desconocido.';
+      const mensaje =
+        err.code === '23505' ? 'Ese IMEI ya está registrado.' : err.code === '23503' ? 'El proveedor de esta fila ya no existe.' : err.message ?? 'Error desconocido.';
       fallidos.push({ fila: item.fila ?? null, nombre: item.nombre ?? null, error: mensaje });
     } finally {
       client.release();

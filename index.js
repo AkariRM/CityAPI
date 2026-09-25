@@ -51,6 +51,7 @@ const catalogoExternoRoutes = require('./src/routes/catalogoExterno.routes');
 const contactoExternoRoutes = require('./src/routes/contactoExterno.routes');
 const reparacionExternaRoutes = require('./src/routes/reparacionExterna.routes');
 const apartadoExternoRoutes = require('./src/routes/apartadoExterno.routes');
+const opcionesEquipoRoutes = require('./src/routes/opcionesEquipo.routes');
 const vinculosCelularRoutes = require('./src/routes/vinculosCelular.routes');
 
 const app = express();
@@ -146,6 +147,7 @@ app.use('/catalogo-externo', catalogoExternoRoutes);
 app.use('/contacto-externo', contactoExternoRoutes);
 app.use('/reparacion-externa', reparacionExternaRoutes);
 app.use('/apartado-externo', apartadoExternoRoutes);
+app.use('/opciones-equipo', opcionesEquipoRoutes);
 app.use('/vinculos-celular', vinculosCelularRoutes);
 
 app.use((req, res) => {

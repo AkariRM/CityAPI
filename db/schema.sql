@@ -890,7 +890,23 @@ CREATE TABLE configuracion_ticket (
   -- cuantas puede tener a la vez un mismo telefono (ver migracion_apartados_agente.sql).
   agente_apartado_horas       integer NOT NULL DEFAULT 48 CHECK (agente_apartado_horas BETWEEN 1 AND 720),
   agente_apartado_max_por_telefono integer NOT NULL DEFAULT 1 CHECK (agente_apartado_max_por_telefono BETWEEN 1 AND 10),
+  -- Codigo que lleva impresa la calcomania de equipo: 'barras' (Code 128 con el IMEI, para lector
+  -- de codigo de barras) o 'qr' (ver migracion_calcomania_equipo_codigo.sql).
+  calcomania_equipo_codigo    text NOT NULL DEFAULT 'barras' CHECK (calcomania_equipo_codigo IN ('barras', 'qr')),
   updated_at                  timestamptz NOT NULL DEFAULT now()
+);
+
+-- Opciones extra para el alta de equipos ("Nuevo equipo"): estatus de companias y tipos de chip
+-- que agrega el administrador (las de fabrica viven en la app). Ver migracion_opciones_equipo.sql.
+CREATE TABLE opciones_equipo (
+  id          uuid PRIMARY KEY DEFAULT gen_random_uuid(),
+  tipo        text NOT NULL CHECK (tipo IN ('estatus', 'chip')),
+  valor       text NOT NULL,   -- como se escribe en el nombre del equipo (mayusculas): "IZZI"
+  etiqueta    text NOT NULL,   -- como se ve en el selector: "Izzi"
+  clave       text NOT NULL,   -- valor sin espacios, guiones ni puntos: evita duplicados ("R-SIM" = "RSIM"), incluso entre estatus y chip
+  creado_por  uuid REFERENCES usuarios(id) ON DELETE SET NULL,
+  created_at  timestamptz NOT NULL DEFAULT now(),
+  UNIQUE (clave)
 );
 
 -- ============================================================================
