@@ -14,6 +14,10 @@ router.use(requireAuth, requireRole('admin', 'tecnico', 'vendedor'));
 
 const ESTADOS_VALIDOS = ['pendiente', 'aprobada', 'rechazada', 'recibida'];
 
+// Un tecnico solo maneja las solicitudes de pieza de SUS reparaciones (mismo criterio que
+// reparaciones.routes.js): devuelve su id para filtrar, o null si el rol ve todas.
+const idDelTecnico = (req) => (req.usuario.rol === 'tecnico' ? req.usuario.sub : null);
+
 router.get('/', async (req, res) => {
   const { estado, reparacion_id } = req.query;
   if (estado !== undefined && !ESTADOS_VALIDOS.includes(estado)) return res.status(400).json({ error: 'Estado inválido.' });
@@ -32,8 +36,9 @@ router.get('/', async (req, res) => {
      LEFT JOIN usuarios ua ON ua.id = sp.aprobado_por
      WHERE ($1::text IS NULL OR sp.estado::text = $1)
        AND ($2::uuid IS NULL OR sp.reparacion_id = $2::uuid)
+       AND ($3::uuid IS NULL OR r.tecnico_id = $3::uuid)
      ORDER BY sp.created_at DESC`,
-    [estado || null, reparacion_id || null]
+    [estado || null, reparacion_id || null, idDelTecnico(req)]
   );
   res.json(rows);
 });
@@ -46,8 +51,10 @@ router.post('/', requireRole('admin', 'tecnico'), async (req, res) => {
   }
   if (!(Number(costo_estimado) >= 0)) return res.status(400).json({ error: 'costo_estimado debe ser un número mayor o igual a 0.' });
 
-  const reparacion = await pool.query(`SELECT id FROM reparaciones WHERE id = $1`, [reparacion_id]);
-  if (!reparacion.rows[0]) return res.status(404).json({ error: 'Reparación no encontrada.' });
+  const reparacion = await pool.query(`SELECT id, tecnico_id FROM reparaciones WHERE id = $1`, [reparacion_id]);
+  if (!reparacion.rows[0] || (idDelTecnico(req) && reparacion.rows[0].tecnico_id !== idDelTecnico(req))) {
+    return res.status(404).json({ error: 'Reparación no encontrada.' });
+  }
 
   const { rows } = await pool.query(
     `INSERT INTO reparacion_solicitudes_pieza (reparacion_id, producto_id, refaccion_id, nombre_libre, descripcion_libre, costo_estimado, solicitado_por)
@@ -122,14 +129,16 @@ router.patch('/:id/rechazar', requireRole('admin'), async (req, res) => {
 router.post('/:id/recibir', requireRole('admin', 'tecnico'), async (req, res) => {
   const { registrar_gasto, cantidad_comprada, crear_refaccion } = req.body ?? {};
   const actual = await pool.query(
-    `SELECT sp.*, r.folio, r.sucursal_id
+    `SELECT sp.*, r.folio, r.sucursal_id, r.tecnico_id AS reparacion_tecnico_id
      FROM reparacion_solicitudes_pieza sp
      JOIN reparaciones r ON r.id = sp.reparacion_id
      WHERE sp.id = $1`,
     [req.params.id]
   );
   const solicitud = actual.rows[0];
-  if (!solicitud) return res.status(404).json({ error: 'Solicitud no encontrada.' });
+  if (!solicitud || (idDelTecnico(req) && solicitud.reparacion_tecnico_id !== idDelTecnico(req))) {
+    return res.status(404).json({ error: 'Solicitud no encontrada.' });
+  }
   if (solicitud.estado !== 'aprobada') return res.status(409).json({ error: 'Solo se puede recibir una solicitud aprobada.' });
 
   let cantidadComprada = null;

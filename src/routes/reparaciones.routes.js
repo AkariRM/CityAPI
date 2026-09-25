@@ -1,6 +1,6 @@
 const express = require('express');
 const { pool } = require('../db');
-const { requireAuth, requireRole } = require('../middleware/auth');
+const { requireAuth, requireRole, esAdminODueno } = require('../middleware/auth');
 const { inicioDiaUTC, finDiaUTCExclusivo } = require('../utils/fechas');
 const { obtenerConfiguracionTicket } = require('../utils/configuracionTicket');
 const { registrarMovimientoRefaccion } = require('../utils/movimientosRefacciones');
@@ -8,6 +8,23 @@ const { registrarMovimientoRefaccion } = require('../utils/movimientosRefaccione
 const router = express.Router();
 
 router.use(requireAuth, requireRole('admin', 'tecnico', 'vendedor'));
+
+const UUID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
+
+// Un tecnico solo ve las reparaciones que tiene asignadas (tecnico_id): admin/supervisor las
+// asignan y quitan, y el vendedor sigue viendo todas (recibe y entrega). Devuelve el id a filtrar,
+// o null si el rol ve todo.
+const idDelTecnico = (req) => (req.usuario.rol === 'tecnico' ? req.usuario.sub : null);
+
+// Toda ruta con :id (detalle, notificaciones, refacciones, fotos, cambios...) pasa por aqui: si
+// la reparacion es de otro tecnico (o no tiene tecnico) responde 404, igual que si no existiera,
+// para no revelar que existe. Si no existe, la ruta misma responde su 404 de siempre.
+router.param('id', async (req, res, next, id) => {
+  if (req.usuario?.rol !== 'tecnico' || !UUID_RE.test(id)) return next();
+  const { rows } = await pool.query(`SELECT tecnico_id FROM reparaciones WHERE id = $1`, [id]);
+  if (rows[0] && rows[0].tecnico_id !== req.usuario.sub) return res.status(404).json({ error: 'Reparación no encontrada.' });
+  next();
+});
 
 const ESTADOS_VALIDOS = ['recibido', 'diagnostico', 'esperando_autorizacion', 'reparacion', 'listo', 'entregado', 'cancelado'];
 const PRIORIDADES_VALIDAS = ['baja', 'media', 'alta'];
@@ -26,8 +43,9 @@ router.get('/refacciones/reporte', async (req, res) => {
      WHERE ($1::timestamptz IS NULL OR r.created_at >= $1::timestamptz)
        AND ($2::timestamptz IS NULL OR r.created_at < $2::timestamptz)
        AND ($3::uuid IS NULL OR r.sucursal_id = $3::uuid)
+       AND ($4::uuid IS NULL OR r.tecnico_id = $4::uuid)
      ORDER BY r.created_at DESC`,
-    [desde ? inicioDiaUTC(desde) : null, hasta ? finDiaUTCExclusivo(hasta) : null, sucursal_id || null]
+    [desde ? inicioDiaUTC(desde) : null, hasta ? finDiaUTCExclusivo(hasta) : null, sucursal_id || null, idDelTecnico(req)]
   );
   res.json(rows);
 });
@@ -84,8 +102,9 @@ router.get('/', async (req, res) => {
        AND ($4::text IS NULL OR r.folio ILIKE '%' || $4 || '%' OR c.nombre ILIKE '%' || $4 || '%' OR r.imei_equipo ILIKE '%' || $4 || '%')
        AND ($5::timestamptz IS NULL OR r.created_at >= $5::timestamptz)
        AND ($6::timestamptz IS NULL OR r.created_at < $6::timestamptz)
+       AND ($7::uuid IS NULL OR r.tecnico_id = $7::uuid)
      ORDER BY r.created_at DESC`,
-    [estado || null, tecnico_id || null, sucursal_id || null, q || null, desde ? inicioDiaUTC(desde) : null, hasta ? finDiaUTCExclusivo(hasta) : null]
+    [estado || null, tecnico_id || null, sucursal_id || null, q || null, desde ? inicioDiaUTC(desde) : null, hasta ? finDiaUTCExclusivo(hasta) : null, idDelTecnico(req)]
   );
   res.json(rows);
 });
@@ -212,14 +231,16 @@ router.post('/', requireRole('admin', 'vendedor', 'tecnico'), async (req, res) =
     }
 
     const reparacion = await client.query(
-      `INSERT INTO reparaciones (cliente_id, sucursal_id, equipo_marca, equipo_modelo, imei_equipo, equipo_contrasena, problema_reportado, prioridad, origen_reparacion, producto_id, unidad_imei_id, equipo_enciende)
-       VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12)
+      `INSERT INTO reparaciones (cliente_id, sucursal_id, equipo_marca, equipo_modelo, imei_equipo, equipo_contrasena, problema_reportado, prioridad, origen_reparacion, producto_id, unidad_imei_id, equipo_enciende, tecnico_id)
+       VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13)
        RETURNING id, folio, estado, created_at`,
       [
         esCompraPropia ? null : cliente_id, sucursal_id, equipo_marca || null, equipo_modelo || null, imei_equipo || null,
         equipo_contrasena || null, problema_reportado.trim(), prioridadFinal,
         esCompraPropia ? 'compra_propia' : 'cliente', producto_id || null, unidad_imei_id || null,
         typeof equipo_enciende === 'boolean' ? equipo_enciende : null,
+        // Si lo recibe un tecnico, queda asignado a el; en los demas casos lo asigna el admin/supervisor.
+        idDelTecnico(req),
       ]
     );
 
@@ -244,6 +265,20 @@ router.patch('/:id', async (req, res) => {
   const actualResult = await pool.query(`SELECT * FROM reparaciones WHERE id = $1`, [req.params.id]);
   const actual = actualResult.rows[0];
   if (!actual) return res.status(404).json({ error: 'Reparación no encontrada.' });
+
+  // Asignar o quitar el tecnico es cosa del admin/supervisor: el resto puede mandar el mismo valor
+  // que ya tiene (la app lo reenvia al guardar) pero no cambiarlo.
+  if (req.body?.tecnico_id !== undefined && req.body.tecnico_id !== actual.tecnico_id) {
+    if (!esAdminODueno(req.usuario.rol)) {
+      return res.status(403).json({ error: 'Solo el administrador o supervisor puede asignar o quitar el técnico.' });
+    }
+    if (req.body.tecnico_id !== null) {
+      const tecnico = UUID_RE.test(String(req.body.tecnico_id))
+        ? await pool.query(`SELECT 1 FROM usuarios WHERE id = $1 AND rol = 'tecnico' AND activo = true`, [req.body.tecnico_id])
+        : { rows: [] };
+      if (!tecnico.rows[0]) return res.status(400).json({ error: 'El técnico no existe o no está activo.' });
+    }
+  }
 
   if (req.body?.estado !== undefined && !ESTADOS_VALIDOS.includes(req.body.estado)) {
     return res.status(400).json({ error: 'Estado inválido.' });
