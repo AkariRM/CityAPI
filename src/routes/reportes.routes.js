@@ -40,6 +40,7 @@ router.get('/financiero', async (req, res) => {
   <utilidadBruta>${resumen.utilidad_bruta.toFixed(2)}</utilidadBruta>
   <gastos>${resumen.gastos.toFixed(2)}</gastos>
   <nominasPagadas>${resumen.nominas_pagadas.toFixed(2)}</nominasPagadas>
+  <nominasTaller>${resumen.nominas_taller.toFixed(2)}</nominasTaller>
   <utilidadNeta>${resumen.utilidad_neta.toFixed(2)}</utilidadNeta>
 </reporteFinanciero>
 `;
@@ -74,6 +75,10 @@ router.get('/financiero', async (req, res) => {
   fila('Utilidad bruta', resumen.utilidad_bruta);
   fila('Gastos', resumen.gastos);
   fila('Nóminas pagadas', resumen.nominas_pagadas);
+  if (resumen.nominas_taller > 0) {
+    doc.fontSize(10).fillColor('#666666').text(`Incluye ${money(resumen.nominas_taller)} de sueldos del taller (no se cargan a ninguna sucursal).`);
+    doc.fillColor('#000000');
+  }
   doc.moveDown(0.5);
   doc.fontSize(14).text(`Utilidad neta: ${money(resumen.utilidad_neta)}`);
 
