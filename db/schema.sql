@@ -51,6 +51,9 @@ CREATE TYPE tipo_movimiento_inventario AS ENUM ('entrada', 'salida', 'ajuste', '
 CREATE TYPE estado_credito AS ENUM ('activo', 'pagado', 'vencido', 'cancelado');
 CREATE TYPE estado_reparacion AS ENUM ('recibido', 'diagnostico', 'esperando_autorizacion', 'reparacion', 'listo', 'entregado', 'cancelado');
 CREATE TYPE prioridad_reparacion AS ENUM ('baja', 'media', 'alta');
+-- Donde esta fisicamente el equipo (el taller es uno solo, compartido por todas las sucursales): en la
+-- sucursal que lo recibio, en camino al taller, en el taller o en camino de regreso a la sucursal.
+CREATE TYPE ubicacion_reparacion AS ENUM ('sucursal', 'en_transito_taller', 'taller', 'en_transito_sucursal');
 CREATE TYPE etiqueta_foto_reparacion AS ENUM ('antes', 'despues', 'diagnostico');
 CREATE TYPE canal_notificacion_cliente AS ENUM ('whatsapp', 'sms');
 CREATE TYPE estado_solicitud_pieza AS ENUM ('pendiente', 'aprobada', 'rechazada', 'recibida');
@@ -560,10 +563,16 @@ CREATE TABLE reparaciones (
   producto_id        uuid REFERENCES productos(id),
   unidad_imei_id     uuid REFERENCES unidades_imei(id),
   origen_reparacion  text NOT NULL DEFAULT 'cliente' CHECK (origen_reparacion IN ('cliente', 'compra_propia')),
+  -- Donde esta el equipo ahora (ver reparacion_traslados y migracion_traslados.sql). Solo se
+  -- entrega estando en 'sucursal'; solo se diagnostica/repara estando en 'taller'.
+  ubicacion          ubicacion_reparacion NOT NULL DEFAULT 'sucursal',
+  -- Primera vez que el taller recibio el equipo. Un tecnico solo ve lo que ya recibio el taller.
+  en_taller_desde    timestamptz,
   created_at         timestamptz NOT NULL DEFAULT now(),
   updated_at         timestamptz NOT NULL DEFAULT now()
 );
 CREATE INDEX idx_reparaciones_estado ON reparaciones(estado);
+CREATE INDEX idx_reparaciones_ubicacion ON reparaciones(ubicacion);
 CREATE INDEX idx_reparaciones_tecnico ON reparaciones(tecnico_id);
 CREATE INDEX idx_reparaciones_cliente ON reparaciones(cliente_id);
 CREATE INDEX idx_reparaciones_producto ON reparaciones(producto_id);
@@ -664,6 +673,20 @@ CREATE TABLE reparacion_historial (
   created_at     timestamptz NOT NULL DEFAULT now()
 );
 CREATE INDEX idx_reparacion_historial_reparacion ON reparacion_historial(reparacion_id);
+
+-- Traslados del equipo entre la sucursal y el taller: quien lo envio y cuando, y quien lo recibio y
+-- cuando (recibido_at NULL = todavia en camino).
+CREATE TABLE reparacion_traslados (
+  id             uuid PRIMARY KEY DEFAULT gen_random_uuid(),
+  reparacion_id  uuid NOT NULL REFERENCES reparaciones(id) ON DELETE CASCADE,
+  sentido        text NOT NULL CHECK (sentido IN ('a_taller', 'a_sucursal')),
+  enviado_por    uuid REFERENCES usuarios(id),
+  enviado_at     timestamptz NOT NULL DEFAULT now(),
+  recibido_por   uuid REFERENCES usuarios(id),
+  recibido_at    timestamptz,
+  nota           text
+);
+CREATE INDEX idx_reparacion_traslados_reparacion ON reparacion_traslados(reparacion_id, enviado_at);
 
 CREATE TABLE reparacion_fotos (
   id             uuid PRIMARY KEY DEFAULT gen_random_uuid(),

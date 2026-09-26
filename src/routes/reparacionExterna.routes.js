@@ -29,6 +29,10 @@ const ESTADO_PARA_COTIZAR = 'esperando_autorizacion';
 
 // Solo tiene sentido hablar de "tiempo restante" mientras el equipo sigue en
 // manos del taller -- de "listo" en adelante ya no hay nada que esperar.
+// El estado que se le informa al cliente: un equipo marcado "listo" que todavia no regresa del taller
+// a la sucursal sigue "en reparacion" (no se puede recoger todavia).
+const estadoParaCliente = (r) => (r.estado === 'listo' && r.ubicacion !== 'sucursal' ? 'reparacion' : r.estado);
+
 const ESTADOS_CON_TIEMPO_RESTANTE = new Set(['recibido', 'diagnostico', 'esperando_autorizacion', 'reparacion']);
 
 // Solo los ultimos 10 digitos cuentan (los telefonos guardados son a 10
@@ -58,7 +62,7 @@ const centavos = (n) => Math.round(Number(n) * 100);
 // = ya va atrasada.
 async function consultarReparaciones(db, { folio, telefono10 }) {
   const { rows } = await db.query(
-    `SELECT r.id, r.folio, r.estado, r.equipo_marca, r.equipo_modelo, r.problema_reportado,
+    `SELECT r.id, r.folio, r.estado, r.ubicacion, r.equipo_marca, r.equipo_modelo, r.problema_reportado,
             r.created_at, r.fecha_estimada_entrega, r.total, r.nota_para_cliente, s.nombre AS sucursal_nombre,
             (r.cotizacion_rechazada_at IS NOT NULL AND r.cotizacion_rechazada_monto = r.total) AS rechazo_vigente,
             ((r.fecha_estimada_entrega AT TIME ZONE 'UTC')::date - (now() AT TIME ZONE 'America/Mexico_City')::date) AS dias_restantes
@@ -93,13 +97,13 @@ async function consultarReparaciones(db, { folio, telefono10 }) {
 
   return rows.map((r) => ({
     folio: r.folio,
-    estado: ESTADO_EXTERNO[r.estado] ?? r.estado,
+    estado: ESTADO_EXTERNO[estadoParaCliente(r)] ?? estadoParaCliente(r),
     equipo: [r.equipo_marca, r.equipo_modelo].filter(Boolean).join(' ') || null,
     falla_reportada: r.problema_reportado,
     fecha_ingreso: r.created_at,
     fecha_estimada_entrega: r.fecha_estimada_entrega,
-    dias_restantes: ESTADOS_CON_TIEMPO_RESTANTE.has(r.estado) && r.dias_restantes != null ? Number(r.dias_restantes) : null,
-    costo_autorizado: ESTADOS_CON_COSTO_AUTORIZADO.has(r.estado) ? Number(r.total) : null,
+    dias_restantes: ESTADOS_CON_TIEMPO_RESTANTE.has(estadoParaCliente(r)) && r.dias_restantes != null ? Number(r.dias_restantes) : null,
+    costo_autorizado: ESTADOS_CON_COSTO_AUTORIZADO.has(estadoParaCliente(r)) ? Number(r.total) : null,
     requiere_autorizacion: r.estado === 'esperando_autorizacion',
     // Total actual del folio, sin desglose. Null si todavia no hay monto (total en
     // cero): en ese caso el agente no debe dar ninguna cifra.

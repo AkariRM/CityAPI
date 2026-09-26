@@ -1,7 +1,7 @@
 const express = require('express');
 const { pool } = require('../db');
 const { requireAuth, requireRole } = require('../middleware/auth');
-const { alcanceReparaciones } = require('../utils/alcanceReparaciones');
+const { alcanceReparaciones, enAlcance, sqlAlcance } = require('../utils/alcanceReparaciones');
 const { obtenerConfiguracionTicket } = require('../utils/configuracionTicket');
 const { registrarMovimientoRefaccion } = require('../utils/movimientosRefacciones');
 
@@ -19,12 +19,7 @@ const ESTADOS_VALIDOS = ['pendiente', 'aprobada', 'rechazada', 'recibida'];
 // reparaciones.routes.js, ver utils/alcanceReparaciones.js): el tecnico las de SUS reparaciones, la
 // sucursal las de las que recibio, el taller (supervisor) y el dueño todas.
 function fueraDeAlcance(req, reparacion) {
-  const alcance = alcanceReparaciones(req.usuario);
-  return !!(
-    alcance.sinAcceso ||
-    (alcance.tecnicoId && reparacion.tecnico_id !== alcance.tecnicoId) ||
-    (alcance.sucursalId && reparacion.sucursal_id !== alcance.sucursalId)
-  );
+  return !enAlcance(alcanceReparaciones(req.usuario), reparacion);
 }
 
 router.get('/', async (req, res) => {
@@ -48,7 +43,7 @@ router.get('/', async (req, res) => {
      WHERE ($1::text IS NULL OR sp.estado::text = $1)
        AND ($2::uuid IS NULL OR sp.reparacion_id = $2::uuid)
        AND ($3::uuid IS NULL OR r.tecnico_id = $3::uuid)
-       AND ($4::uuid IS NULL OR r.sucursal_id = $4::uuid)
+       AND ($4::uuid IS NULL OR r.sucursal_id = $4::uuid)${sqlAlcance(alcance)}
      ORDER BY sp.created_at DESC`,
     [estado || null, reparacion_id || null, alcance.tecnicoId ?? null, alcance.sucursalId ?? null]
   );
@@ -65,7 +60,7 @@ router.post('/', requireRole('dueño', 'supervisor_taller', 'tecnico'), async (r
   }
   if (!(Number(costo_estimado) >= 0)) return res.status(400).json({ error: 'costo_estimado debe ser un número mayor o igual a 0.' });
 
-  const reparacion = await pool.query(`SELECT id, tecnico_id, sucursal_id FROM reparaciones WHERE id = $1`, [reparacion_id]);
+  const reparacion = await pool.query(`SELECT id, tecnico_id, sucursal_id, en_taller_desde, ubicacion FROM reparaciones WHERE id = $1`, [reparacion_id]);
   if (!reparacion.rows[0] || fueraDeAlcance(req, reparacion.rows[0])) {
     return res.status(404).json({ error: 'Reparación no encontrada.' });
   }
@@ -143,14 +138,16 @@ router.patch('/:id/rechazar', requireRole('dueño', 'supervisor_taller'), async 
 router.post('/:id/recibir', requireRole('dueño', 'supervisor_taller', 'tecnico'), async (req, res) => {
   const { registrar_gasto, cantidad_comprada, crear_refaccion } = req.body ?? {};
   const actual = await pool.query(
-    `SELECT sp.*, r.folio, r.sucursal_id, r.tecnico_id AS reparacion_tecnico_id
+    `SELECT sp.*, r.folio, r.sucursal_id, r.tecnico_id AS reparacion_tecnico_id, r.en_taller_desde, r.ubicacion
      FROM reparacion_solicitudes_pieza sp
      JOIN reparaciones r ON r.id = sp.reparacion_id
      WHERE sp.id = $1`,
     [req.params.id]
   );
   const solicitud = actual.rows[0];
-  if (!solicitud || fueraDeAlcance(req, { tecnico_id: solicitud.reparacion_tecnico_id, sucursal_id: solicitud.sucursal_id })) {
+  if (!solicitud || fueraDeAlcance(req, {
+    tecnico_id: solicitud.reparacion_tecnico_id, sucursal_id: solicitud.sucursal_id, en_taller_desde: solicitud.en_taller_desde, ubicacion: solicitud.ubicacion,
+  })) {
     return res.status(404).json({ error: 'Solicitud no encontrada.' });
   }
   if (solicitud.estado !== 'aprobada') return res.status(409).json({ error: 'Solo se puede recibir una solicitud aprobada.' });

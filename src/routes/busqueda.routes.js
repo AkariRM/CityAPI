@@ -1,7 +1,7 @@
 const express = require('express');
 const { pool } = require('../db');
 const { requireAuth, esAdminODueno } = require('../middleware/auth');
-const { alcanceReparaciones, esPersonalTaller } = require('../utils/alcanceReparaciones');
+const { alcanceReparaciones, sqlAlcance, esPersonalTaller } = require('../utils/alcanceReparaciones');
 
 const router = express.Router();
 router.use(requireAuth);
@@ -60,7 +60,7 @@ router.get('/', async (req, res) => {
            FROM reparaciones r JOIN clientes c ON c.id = r.cliente_id
            WHERE ($1::uuid IS NULL OR r.sucursal_id = $1::uuid) AND (r.folio ILIKE $2 OR c.nombre ILIKE $2)
              AND ($3::uuid IS NULL OR r.tecnico_id = $3::uuid)
-             AND ($4::uuid IS NULL OR r.sucursal_id = $4::uuid)
+             AND ($4::uuid IS NULL OR r.sucursal_id = $4::uuid)${sqlAlcance(alcance)}
            ORDER BY r.created_at DESC LIMIT 5`,
           [sucursal_id || null, like, alcance.tecnicoId ?? null, alcance.sucursalId ?? null]
         )

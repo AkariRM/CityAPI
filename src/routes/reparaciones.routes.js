@@ -1,7 +1,7 @@
 const express = require('express');
 const { pool } = require('../db');
 const { requireAuth, requireRole } = require('../middleware/auth');
-const { alcanceReparaciones, esPersonalTaller } = require('../utils/alcanceReparaciones');
+const { alcanceReparaciones, enAlcance, sqlAlcance, esPersonalTaller } = require('../utils/alcanceReparaciones');
 const { inicioDiaUTC, finDiaUTCExclusivo } = require('../utils/fechas');
 const { obtenerConfiguracionTicket } = require('../utils/configuracionTicket');
 const { registrarMovimientoRefaccion } = require('../utils/movimientosRefacciones');
@@ -23,15 +23,21 @@ const idDelTecnico = (req) => alcanceReparaciones(req.usuario).tecnicoId ?? null
 router.param('id', async (req, res, next, id) => {
   const alcance = alcanceReparaciones(req.usuario);
   if (alcance.sinAcceso) return res.status(404).json({ error: 'Reparación no encontrada.' });
-  if ((!alcance.tecnicoId && !alcance.sucursalId) || !UUID_RE.test(id)) return next();
-  const { rows } = await pool.query(`SELECT tecnico_id, sucursal_id FROM reparaciones WHERE id = $1`, [id]);
+  if (Object.keys(alcance).length === 0 || !UUID_RE.test(id)) return next();
+  const { rows } = await pool.query(`SELECT tecnico_id, sucursal_id, en_taller_desde, ubicacion FROM reparaciones WHERE id = $1`, [id]);
   const r = rows[0];
-  if (r && ((alcance.tecnicoId && r.tecnico_id !== alcance.tecnicoId) || (alcance.sucursalId && r.sucursal_id !== alcance.sucursalId))) {
-    return res.status(404).json({ error: 'Reparación no encontrada.' });
-  }
+  if (r && !enAlcance(alcance, r)) return res.status(404).json({ error: 'Reparación no encontrada.' });
   next();
 });
 
+const UBICACIONES_VALIDAS = ['sucursal', 'en_transito_taller', 'taller', 'en_transito_sucursal'];
+// Pasos que marca el taller (los demas los cambia la sucursal: recibido, entregado, cancelado).
+const ESTADOS_DEL_TALLER = ['diagnostico', 'esperando_autorizacion', 'reparacion', 'listo'];
+const MENSAJE_FUERA_DEL_TALLER = {
+  sucursal: 'El equipo todavía está en la sucursal: espera a que lo envíen y recíbelo en el taller.',
+  en_transito_taller: 'El equipo va en camino: recíbelo en el taller antes de trabajar en él.',
+  en_transito_sucursal: 'El equipo ya va de regreso a la sucursal.',
+};
 const ESTADOS_VALIDOS = ['recibido', 'diagnostico', 'esperando_autorizacion', 'reparacion', 'listo', 'entregado', 'cancelado'];
 const PRIORIDADES_VALIDAS = ['baja', 'media', 'alta'];
 const METODOS_PAGO_VALIDOS = ['efectivo', 'tarjeta'];
@@ -90,20 +96,24 @@ router.get('/reporte-tecnicos', requireRole('dueño', 'supervisor_taller'), asyn
 // desde/hasta son opcionales (los usa la pantalla de Historial; el panel
 // Kanban los deja sin mandar y ve todo, igual que antes).
 router.get('/', async (req, res) => {
-  const { estado, tecnico_id, sucursal_id, q, desde, hasta } = req.query;
+  const { estado, tecnico_id, sucursal_id, q, desde, hasta, ubicacion, abiertas } = req.query;
   const alcance = alcanceReparaciones(req.usuario);
   if (alcance.sinAcceso) return res.json([]);
+  // ubicacion: una o varias separadas por coma; abiertas=true: sin las entregadas ni canceladas.
+  const ubicaciones = ubicacion ? String(ubicacion).split(',').map((u) => u.trim()).filter((u) => UBICACIONES_VALIDAS.includes(u)) : null;
   const { rows } = await pool.query(
     `SELECT r.id, r.folio, r.cliente_id, c.nombre AS cliente_nombre, r.sucursal_id,
             r.equipo_marca, r.equipo_modelo, r.imei_equipo, r.problema_reportado, r.diagnostico,
             r.estado, r.prioridad, r.tecnico_id, t.nombre AS tecnico_nombre,
             r.costo_mano_obra, r.costo_refacciones, r.total, r.garantia_dias,
             r.origen_reparacion, r.producto_id, p.nombre AS producto_nombre, r.unidad_imei_id, r.created_at, r.updated_at,
+            r.ubicacion, r.en_taller_desde, sc.nombre AS sucursal_nombre,
             (r.estado = 'esperando_autorizacion' AND r.cotizacion_rechazada_at IS NOT NULL AND r.cotizacion_rechazada_monto = r.total) AS cotizacion_rechazada
      FROM reparaciones r
      LEFT JOIN clientes c ON c.id = r.cliente_id
      LEFT JOIN productos p ON p.id = r.producto_id
      LEFT JOIN usuarios t ON t.id = r.tecnico_id
+     LEFT JOIN sucursales sc ON sc.id = r.sucursal_id
      WHERE ($1::text IS NULL OR r.estado::text = $1)
        AND ($2::uuid IS NULL OR r.tecnico_id = $2::uuid)
        AND ($3::uuid IS NULL OR r.sucursal_id = $3::uuid)
@@ -112,10 +122,12 @@ router.get('/', async (req, res) => {
        AND ($6::timestamptz IS NULL OR r.created_at < $6::timestamptz)
        AND ($7::uuid IS NULL OR r.tecnico_id = $7::uuid)
        AND ($8::uuid IS NULL OR r.sucursal_id = $8::uuid)
+       AND ($9::text[] IS NULL OR r.ubicacion::text = ANY($9::text[]))
+       AND ($10::boolean IS NOT TRUE OR r.estado NOT IN ('entregado', 'cancelado'))${sqlAlcance(alcance)}
      ORDER BY r.created_at DESC`,
     [
       estado || null, tecnico_id || null, sucursal_id || null, q || null, desde ? inicioDiaUTC(desde) : null, hasta ? finDiaUTCExclusivo(hasta) : null,
-      alcance.tecnicoId ?? null, alcance.sucursalId ?? null,
+      alcance.tecnicoId ?? null, alcance.sucursalId ?? null, ubicaciones && ubicaciones.length ? ubicaciones : null, abiertas === 'true',
     ]
   );
   res.json(rows);
@@ -131,7 +143,8 @@ router.get('/:id', async (req, res) => {
             r.fecha_estimada_entrega, r.nota_para_cliente, r.checklist_revision,
             r.cotizacion_rechazada_at, r.cotizacion_rechazada_monto,
             (r.estado = 'esperando_autorizacion' AND r.cotizacion_rechazada_at IS NOT NULL AND r.cotizacion_rechazada_monto = r.total) AS cotizacion_rechazada,
-            r.origen_reparacion, r.producto_id, prod.nombre AS producto_nombre, prod.activo AS producto_activo, r.unidad_imei_id, r.created_at, r.updated_at
+            r.origen_reparacion, r.producto_id, prod.nombre AS producto_nombre, prod.activo AS producto_activo, r.unidad_imei_id, r.created_at, r.updated_at,
+            r.ubicacion, r.en_taller_desde
      FROM reparaciones r
      LEFT JOIN clientes c ON c.id = r.cliente_id
      JOIN sucursales s ON s.id = r.sucursal_id
@@ -181,6 +194,17 @@ router.get('/:id', async (req, res) => {
     [req.params.id]
   );
 
+  // Recorrido del equipo entre la sucursal y el taller.
+  const traslados = await pool.query(
+    `SELECT t.id, t.sentido, t.enviado_at, t.recibido_at, t.nota, ue.nombre AS enviado_por_nombre, ur.nombre AS recibido_por_nombre
+     FROM reparacion_traslados t
+     LEFT JOIN usuarios ue ON ue.id = t.enviado_por
+     LEFT JOIN usuarios ur ON ur.id = t.recibido_por
+     WHERE t.reparacion_id = $1
+     ORDER BY t.enviado_at ASC`,
+    [req.params.id]
+  );
+
   // Datos del ticket embebidos aqui (no via GET /configuracion-ticket, que es
   // solo-admin) para que tecnico/vendedor tambien puedan imprimir el
   // comprobante sin necesitar ese permiso — mismo patron que POST /ventas.
@@ -199,6 +223,7 @@ router.get('/:id', async (req, res) => {
     refacciones: refacciones.rows,
     abonos: esPersonalTaller(req.usuario.rol) ? [] : abonos.rows,
     fotos: fotos.rows,
+    traslados: traslados.rows,
     nombre_negocio: configTicket.nombre_negocio,
     mostrar_direccion: configTicket.mostrar_direccion,
     mostrar_telefono: configTicket.mostrar_telefono,
@@ -321,6 +346,39 @@ router.patch('/:id', async (req, res) => {
     return res.status(400).json({ error: 'equipo_enciende debe ser verdadero o falso.' });
   }
 
+  // Reglas del recorrido del equipo (sucursal <-> taller). El dueño puede todo (correcciones).
+  if (req.usuario.rol !== 'dueño') {
+    const b = req.body ?? {};
+    const cambiaEstado = b.estado !== undefined && b.estado !== actual.estado;
+    const cambiaDiagnostico = b.diagnostico !== undefined && (b.diagnostico ?? null) !== (actual.diagnostico ?? null);
+    const cambiaCosto = b.costo_mano_obra !== undefined && Number(b.costo_mano_obra) !== Number(actual.costo_mano_obra);
+    const cambiaGarantia = b.garantia_dias !== undefined && b.garantia_dias !== actual.garantia_dias;
+    if (esPersonalTaller(req.usuario.rol)) {
+      // El taller solo trabaja el equipo mientras esta en el taller, y no entrega ni cancela.
+      if ((cambiaEstado || cambiaDiagnostico || cambiaCosto || cambiaGarantia) && actual.ubicacion !== 'taller') {
+        return res.status(409).json({ error: MENSAJE_FUERA_DEL_TALLER[actual.ubicacion] });
+      }
+      if (cambiaEstado && !ESTADOS_DEL_TALLER.includes(b.estado)) {
+        return res.status(403).json({ error: 'El taller solo marca diagnóstico, esperando autorización, en reparación y listo.' });
+      }
+    } else {
+      // La sucursal entrega y cancela; el diagnostico y los pasos del taller los captura el taller.
+      if (cambiaDiagnostico) return res.status(403).json({ error: 'El diagnóstico lo captura el taller.' });
+      if (cambiaEstado && !['entregado', 'cancelado'].includes(b.estado)) {
+        return res.status(403).json({ error: 'Ese estado lo cambia el taller.' });
+      }
+      if (cambiaEstado && b.estado === 'entregado') {
+        if (actual.estado !== 'listo') return res.status(409).json({ error: 'Solo se entrega un equipo que ya está listo.' });
+        if (actual.ubicacion !== 'sucursal') {
+          return res.status(409).json({ error: 'El equipo todavía no ha regresado a la sucursal: recíbelo aquí antes de entregarlo.' });
+        }
+      }
+      if (cambiaEstado && b.estado === 'cancelado' && actual.estado === 'entregado') {
+        return res.status(409).json({ error: 'Un folio entregado no se puede cancelar.' });
+      }
+    }
+  }
+
   const nuevoEstado = req.body?.estado ?? actual.estado;
   const costoManoObra = req.body?.costo_mano_obra !== undefined ? Number(req.body.costo_mano_obra) : Number(actual.costo_mano_obra);
   const total = costoManoObra + Number(actual.costo_refacciones);
@@ -410,6 +468,91 @@ router.patch('/:id', async (req, res) => {
   }
 });
 
+// Traslados del equipo (sucursal -> taller -> sucursal). Cada paso lo hace quien corresponde y solo
+// desde la ubicacion correcta; queda registrado quien y cuando en reparacion_traslados.
+const DONDE = {
+  sucursal: 'en la sucursal',
+  en_transito_taller: 'en camino al taller',
+  taller: 'en el taller',
+  en_transito_sucursal: 'en camino a la sucursal',
+};
+
+async function cambiarUbicacion(req, res, { desde, hacia, sentido, llegada = false, validar = null }) {
+  const nota = typeof req.body?.nota === 'string' && req.body.nota.trim() ? req.body.nota.trim().slice(0, 300) : null;
+  const client = await pool.connect();
+  try {
+    await client.query('BEGIN');
+    const { rows } = await client.query(`SELECT id, ubicacion, estado FROM reparaciones WHERE id = $1 FOR UPDATE`, [req.params.id]);
+    const r = rows[0];
+    if (!r) throw Object.assign(new Error('Reparación no encontrada.'), { statusCode: 404 });
+    if (r.ubicacion !== desde) {
+      throw Object.assign(new Error(`Este equipo está ${DONDE[r.ubicacion]}, no ${DONDE[desde]}.`), { statusCode: 409 });
+    }
+    const problema = validar ? validar(r) : null;
+    if (problema) throw Object.assign(new Error(problema), { statusCode: 409 });
+
+    if (llegada) {
+      // Confirma la llegada del ultimo traslado que iba en camino (si por datos viejos no hay, lo registra).
+      const actualizado = await client.query(
+        `UPDATE reparacion_traslados SET recibido_por = $2, recibido_at = now(), nota = COALESCE($4, nota)
+         WHERE id = (SELECT id FROM reparacion_traslados WHERE reparacion_id = $1 AND sentido = $3 AND recibido_at IS NULL ORDER BY enviado_at DESC LIMIT 1)`,
+        [req.params.id, req.usuario.sub, sentido, nota]
+      );
+      if (actualizado.rowCount === 0) {
+        await client.query(
+          `INSERT INTO reparacion_traslados (reparacion_id, sentido, recibido_por, recibido_at, nota) VALUES ($1, $2, $3, now(), $4)`,
+          [req.params.id, sentido, req.usuario.sub, nota]
+        );
+      }
+    } else {
+      await client.query(
+        `INSERT INTO reparacion_traslados (reparacion_id, sentido, enviado_por, nota) VALUES ($1, $2, $3, $4)`,
+        [req.params.id, sentido, req.usuario.sub, nota]
+      );
+    }
+
+    const { rows: nueva } = await client.query(
+      `UPDATE reparaciones
+       SET ubicacion = $2::ubicacion_reparacion,
+           en_taller_desde = CASE WHEN $2::text = 'taller' THEN COALESCE(en_taller_desde, now()) ELSE en_taller_desde END
+       WHERE id = $1
+       RETURNING id, folio, ubicacion, en_taller_desde`,
+      [req.params.id, hacia]
+    );
+    await client.query('COMMIT');
+    res.json(nueva[0]);
+  } catch (err) {
+    await client.query('ROLLBACK');
+    res.status(err.statusCode ?? 500).json({ error: err.statusCode ? err.message : 'Error interno del servidor.' });
+    if (!err.statusCode) console.error(err);
+  } finally {
+    client.release();
+  }
+}
+
+// La sucursal que recibio el equipo lo manda al taller...
+router.post('/:id/enviar-al-taller', requireRole('admin', 'vendedor'), (req, res) =>
+  cambiarUbicacion(req, res, {
+    desde: 'sucursal', hacia: 'en_transito_taller', sentido: 'a_taller',
+    validar: (r) => (['entregado', 'cancelado'].includes(r.estado) ? 'Un folio entregado o cancelado no se envía al taller.' : null),
+  })
+);
+// ...el taller (supervisor) confirma que llego y desde ahi se trabaja...
+router.post('/:id/recibir-en-taller', requireRole('dueño', 'supervisor_taller', 'tecnico'), (req, res) =>
+  cambiarUbicacion(req, res, { desde: 'en_transito_taller', hacia: 'taller', sentido: 'a_taller', llegada: true })
+);
+// ...al terminar (o si se cancelo) lo manda de regreso...
+router.post('/:id/enviar-a-sucursal', requireRole('dueño', 'supervisor_taller', 'tecnico'), (req, res) =>
+  cambiarUbicacion(req, res, {
+    desde: 'taller', hacia: 'en_transito_sucursal', sentido: 'a_sucursal',
+    validar: (r) => (['listo', 'cancelado'].includes(r.estado) ? null : 'Marca el equipo como "Listo" antes de enviarlo a la sucursal.'),
+  })
+);
+// ...y la sucursal confirma que lo recibio, para poder entregarlo.
+router.post('/:id/recibir-en-sucursal', requireRole('admin', 'vendedor'), (req, res) =>
+  cambiarUbicacion(req, res, { desde: 'en_transito_sucursal', hacia: 'sucursal', sentido: 'a_sucursal', llegada: true })
+);
+
 const CANALES_VALIDOS = ['whatsapp'];
 
 // No hay integracion real de WhatsApp/SMS (requeriria WhatsApp Business API
@@ -452,9 +595,12 @@ router.post('/:id/refacciones', requireRole('dueño', 'supervisor_taller', 'tecn
   if (!refaccion_id) return res.status(400).json({ error: 'refaccion_id es requerido.' });
   const cant = Number(cantidad) || 1;
 
-  const reparacionResult = await pool.query(`SELECT folio FROM reparaciones WHERE id = $1`, [req.params.id]);
+  const reparacionResult = await pool.query(`SELECT folio, ubicacion FROM reparaciones WHERE id = $1`, [req.params.id]);
   const reparacion = reparacionResult.rows[0];
   if (!reparacion) return res.status(404).json({ error: 'Reparación no encontrada.' });
+  if (req.usuario.rol !== 'dueño' && reparacion.ubicacion !== 'taller') {
+    return res.status(409).json({ error: 'El equipo no está en el taller: recíbelo antes de usar piezas.' });
+  }
 
   const client = await pool.connect();
   try {
