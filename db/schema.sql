@@ -115,6 +115,9 @@ CREATE TABLE usuarios (
   empresa_preferida_id  uuid REFERENCES empresas(id),
   sucursal_id           uuid REFERENCES sucursales(id),
   pin_hash              text NOT NULL,
+  -- Contraseña para entrar con correo (bcrypt). Al migrar, es el mismo cifrado del PIN (el PIN queda como
+  -- contraseña por el momento). Si es NULL se usa pin_hash. Al cambiarla, pin_hash se invalida (ya no se entra con PIN).
+  password_hash         text,
   intentos_fallidos     smallint NOT NULL DEFAULT 0,
   bloqueado_hasta       timestamptz,
   avatar_color          text,
@@ -122,6 +125,8 @@ CREATE TABLE usuarios (
   created_at            timestamptz NOT NULL DEFAULT now(),
   updated_at            timestamptz NOT NULL DEFAULT now()
 );
+-- Un correo identifica a una sola cuenta, sin importar mayusculas (se guarda en minusculas).
+CREATE UNIQUE INDEX idx_usuarios_email_lower ON usuarios (lower(email)) WHERE email IS NOT NULL;
 CREATE INDEX idx_usuarios_rol ON usuarios(rol);
 CREATE INDEX idx_usuarios_sucursal ON usuarios(sucursal_id);
 CREATE INDEX idx_usuarios_empresa ON usuarios(empresa_id);

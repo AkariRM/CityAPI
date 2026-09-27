@@ -2,6 +2,9 @@ const express = require('express');
 const rateLimit = require('express-rate-limit');
 const { pool } = require('../db');
 const { verifyPin } = require('../utils/pin');
+const {
+  isValidPassword, MENSAJE_PASSWORD, hashPassword, verifyPassword, hashInservible, HASH_FALSO, normalizarCorreo, esCorreoValido,
+} = require('../utils/password');
 const { signSession } = require('../utils/jwt');
 const { requireAuth, requireRole } = require('../middleware/auth');
 
@@ -62,7 +65,89 @@ router.get('/usuarios', async (req, res) => {
   res.json(rows);
 });
 
+// Respuesta de un inicio de sesion correcto (igual para el login por correo y por PIN).
+function responderSesion(res, usuario) {
+  const token = signSession(usuario);
+  res.json({
+    token,
+    usuario: {
+      id: usuario.id,
+      nombre: usuario.nombre,
+      email: usuario.email,
+      rol: usuario.rol,
+      sucursal_id: usuario.sucursal_id,
+      sucursal_nombre: usuario.sucursal_nombre,
+      empresa_id: usuario.empresa_id,
+      empresa_slug: usuario.empresa_slug,
+      empresa_nombre: usuario.empresa_nombre,
+      // Solo tiene sentido para 'dueño' (empresa_id es NULL) — con qué
+      // empresa debe arrancar la app la próxima vez, en cualquier
+      // dispositivo. Si nunca ha elegido una, cae en 'cityphone'.
+      empresa_preferida_slug: usuario.empresa_preferida_slug ?? 'cityphone',
+    },
+  });
+}
+
+// Inicio de sesion con correo y contraseña. Mismos candados que el de PIN (sucursal fija del equipo, bloqueo por cuenta
+// tras 5 fallos, limite por IP) pero con un mensaje unico para no delatar si el correo existe.
+const ERROR_CREDENCIALES = 'Correo o contraseña incorrectos.';
+async function loginConCorreo(req, res) {
+  const { correo, password, sucursal_dispositivo } = req.body ?? {};
+  const correoNormal = normalizarCorreo(correo);
+  if (!correoNormal || typeof password !== 'string' || !password) {
+    return res.status(400).json({ error: 'Escribe tu correo y tu contraseña.' });
+  }
+  if (sucursal_dispositivo !== undefined && sucursal_dispositivo !== null && !UUID_RE.test(sucursal_dispositivo)) {
+    return res.status(400).json({ error: 'sucursal_dispositivo inválido.' });
+  }
+
+  const { rows } = await pool.query(
+    `SELECT u.*, s.nombre AS sucursal_nombre,
+            e.slug AS empresa_slug, e.nombre AS empresa_nombre,
+            ep.slug AS empresa_preferida_slug
+     FROM usuarios u
+     LEFT JOIN sucursales s ON s.id = u.sucursal_id
+     LEFT JOIN empresas e ON e.id = u.empresa_id
+     LEFT JOIN empresas ep ON ep.id = u.empresa_preferida_id
+     WHERE lower(u.email) = $1 AND u.activo = true`,
+    [correoNormal]
+  );
+  const usuario = rows[0];
+  if (!usuario) {
+    verifyPassword(password, HASH_FALSO);
+    return res.status(401).json({ error: ERROR_CREDENCIALES });
+  }
+
+  // Antes de la contraseña, para que no cuente como intento fallido ni deje probar contraseñas.
+  if (sucursal_dispositivo && !puedeEntrarEnSucursal(usuario, sucursal_dispositivo)) {
+    return res.status(403).json({ error: 'Este usuario es de otra sucursal y no puede iniciar sesión en este equipo.' });
+  }
+
+  if (usuario.bloqueado_hasta && new Date(usuario.bloqueado_hasta) > new Date()) {
+    const segundos = Math.ceil((new Date(usuario.bloqueado_hasta) - new Date()) / 1000);
+    return res.status(423).json({ error: `Cuenta bloqueada. Intenta de nuevo en ${segundos}s.`, locked: true });
+  }
+
+  // Si por algo no tiene password_hash (cuenta creada justo durante la migracion) se usa el cifrado del PIN.
+  if (!verifyPassword(password, usuario.password_hash ?? usuario.pin_hash)) {
+    const intentos = usuario.intentos_fallidos + 1;
+    const bloqueado = intentos >= MAX_INTENTOS;
+    await pool.query(
+      `UPDATE usuarios SET intentos_fallidos = $1, bloqueado_hasta = $2 WHERE id = $3`,
+      [bloqueado ? 0 : intentos, bloqueado ? new Date(Date.now() + BLOQUEO_MS) : null, usuario.id]
+    );
+    if (bloqueado) {
+      return res.status(423).json({ error: `Demasiados intentos. Cuenta bloqueada ${BLOQUEO_MS / 60000} min.`, locked: true });
+    }
+    return res.status(401).json({ error: ERROR_CREDENCIALES });
+  }
+
+  await pool.query('UPDATE usuarios SET intentos_fallidos = 0, bloqueado_hasta = NULL WHERE id = $1', [usuario.id]);
+  responderSesion(res, usuario);
+}
+
 router.post('/login', loginLimiter, async (req, res) => {
+  if (req.body?.correo !== undefined) return loginConCorreo(req, res);
   const { usuario_id, pin, sucursal_dispositivo } = req.body ?? {};
   if (!usuario_id || !pin) {
     return res.status(400).json({ error: 'usuario_id y pin son requeridos.' });
@@ -112,24 +197,28 @@ router.post('/login', loginLimiter, async (req, res) => {
 
   await pool.query('UPDATE usuarios SET intentos_fallidos = 0, bloqueado_hasta = NULL WHERE id = $1', [usuario.id]);
 
-  const token = signSession(usuario);
-  res.json({
-    token,
-    usuario: {
-      id: usuario.id,
-      nombre: usuario.nombre,
-      rol: usuario.rol,
-      sucursal_id: usuario.sucursal_id,
-      sucursal_nombre: usuario.sucursal_nombre,
-      empresa_id: usuario.empresa_id,
-      empresa_slug: usuario.empresa_slug,
-      empresa_nombre: usuario.empresa_nombre,
-      // Solo tiene sentido para 'dueño' (empresa_id es NULL) — con qué
-      // empresa debe arrancar la app la próxima vez, en cualquier
-      // dispositivo. Si nunca ha elegido una, cae en 'cityphone'.
-      empresa_preferida_slug: usuario.empresa_preferida_slug ?? 'cityphone',
-    },
-  });
+  responderSesion(res, usuario);
+});
+
+// Cambiar la contraseña propia. Al cambiarla, el PIN (que era la contraseña por el momento) deja de servir:
+// pin_hash se cambia por un valor que nadie conoce. Un error de "contraseña actual" es 400 (no 401) para que la app
+// no lo confunda con una sesion vencida.
+router.post('/cambiar-password', loginLimiter, requireAuth, async (req, res) => {
+  const { actual, nueva } = req.body ?? {};
+  if (typeof actual !== 'string' || !actual) return res.status(400).json({ error: 'Escribe tu contraseña actual.' });
+  if (!isValidPassword(nueva)) return res.status(400).json({ error: MENSAJE_PASSWORD });
+  if (nueva === actual) return res.status(400).json({ error: 'La contraseña nueva tiene que ser distinta de la actual.' });
+
+  const usuario = (await pool.query('SELECT id, password_hash, pin_hash FROM usuarios WHERE id = $1', [req.usuario.sub])).rows[0];
+  if (!usuario || !verifyPassword(actual, usuario.password_hash ?? usuario.pin_hash)) {
+    return res.status(400).json({ error: 'La contraseña actual no es correcta.' });
+  }
+
+  await pool.query(
+    `UPDATE usuarios SET password_hash = $1, pin_hash = $2, intentos_fallidos = 0, bloqueado_hasta = NULL WHERE id = $3`,
+    [hashPassword(nueva), hashInservible(), usuario.id]
+  );
+  res.json({ ok: true });
 });
 
 // Lista de empresas activas — la usa el switcher del Dueño para mapear

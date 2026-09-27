@@ -2,6 +2,7 @@ const express = require('express');
 const { pool } = require('../db');
 const { requireAuth, requireRole } = require('../middleware/auth');
 const { isValidPin, hashPin } = require('../utils/pin');
+const { isValidPassword, MENSAJE_PASSWORD, hashPassword, hashInservible, normalizarCorreo, esCorreoValido } = require('../utils/password');
 
 const router = express.Router();
 const ROLES_VALIDOS = ['dueño', 'admin', 'vendedor', 'tecnico', 'community_manager', 'pto', 'supervisor_taller'];
@@ -34,11 +35,25 @@ router.get('/', async (req, res) => {
 });
 
 router.post('/', async (req, res) => {
-  const { nombre, telefono, email, rol, sucursal_id, empresa_id, pin } = req.body ?? {};
+  const { nombre, telefono, email, rol, sucursal_id, empresa_id, pin, password } = req.body ?? {};
 
   if (!nombre?.trim()) return res.status(400).json({ error: 'El nombre es requerido.' });
   if (!ROLES_VALIDOS.includes(rol)) return res.status(400).json({ error: 'Rol inválido.' });
-  if (!isValidPin(pin)) return res.status(400).json({ error: 'El PIN debe ser de 4 dígitos.' });
+
+  // Credencial: la cuenta entra con CORREO Y CONTRASEÑA. (Una version anterior de la app manda solo un PIN de 4
+  // digitos: se acepta mientras dure la transicion y queda como contraseña.)
+  const correo = email ? normalizarCorreo(email) : null;
+  if (correo && !esCorreoValido(correo)) return res.status(400).json({ error: 'El correo no es válido.' });
+  let credencial;
+  if (password !== undefined) {
+    if (!correo) return res.status(400).json({ error: 'El correo es requerido.' });
+    if (!isValidPassword(password)) return res.status(400).json({ error: MENSAJE_PASSWORD });
+    credencial = { password_hash: hashPassword(password), pin_hash: hashInservible() };
+  } else {
+    if (!isValidPin(pin)) return res.status(400).json({ error: 'La contraseña es requerida.' });
+    const h = hashPin(pin);
+    credencial = { password_hash: h, pin_hash: h };
+  }
 
   // Asignar acceso de Dueño o Admin (osea, a una empresa completa) es
   // decisión exclusiva del Dueño — un Admin normal no puede crear otro
@@ -71,14 +86,19 @@ router.post('/', async (req, res) => {
     return res.status(400).json({ error: 'La sucursal es requerida.' });
   }
 
-  const { rows } = await pool.query(
-    `INSERT INTO usuarios (nombre, telefono, email, rol, sucursal_id, empresa_id, pin_hash)
-     VALUES ($1, $2, $3, $4, $5, $6, $7)
-     RETURNING id, nombre, telefono, email, rol, sucursal_id, empresa_id, activo, created_at`,
-    // Dueño y personal del taller no llevan sucursal (el taller es uno solo, compartido).
-    [nombre.trim(), telefono || null, email || null, rol, rol === 'dueño' || ROLES_DEL_TALLER.includes(rol) ? null : sucursal_id || null, rol === 'dueño' ? null : empresa_id, hashPin(pin)]
-  );
-  res.status(201).json(rows[0]);
+  try {
+    const { rows } = await pool.query(
+      `INSERT INTO usuarios (nombre, telefono, email, rol, sucursal_id, empresa_id, pin_hash, password_hash)
+       VALUES ($1, $2, $3, $4, $5, $6, $7, $8)
+       RETURNING id, nombre, telefono, email, rol, sucursal_id, empresa_id, activo, created_at`,
+      // Dueño y personal del taller no llevan sucursal (el taller es uno solo, compartido).
+      [nombre.trim(), telefono || null, correo, rol, rol === 'dueño' || ROLES_DEL_TALLER.includes(rol) ? null : sucursal_id || null, rol === 'dueño' ? null : empresa_id, credencial.pin_hash, credencial.password_hash]
+    );
+    res.status(201).json(rows[0]);
+  } catch (err) {
+    if (err.code === '23505') return res.status(409).json({ error: 'Ese correo ya está en uso por otra cuenta.' });
+    throw err;
+  }
 });
 
 router.patch('/:id', async (req, res) => {
@@ -101,7 +121,12 @@ router.patch('/:id', async (req, res) => {
     return res.status(400).json({ error: 'La sucursal es requerida.' });
   }
 
-  const fields = { nombre, telefono, email, rol, sucursal_id: sucursalFinal, empresa_id, activo };
+  let correo;
+  if (email !== undefined) {
+    correo = email ? normalizarCorreo(email) : null;
+    if (correo && !esCorreoValido(correo)) return res.status(400).json({ error: 'El correo no es válido.' });
+  }
+  const fields = { nombre, telefono, email: correo, rol, sucursal_id: sucursalFinal, empresa_id, activo };
   const sets = [];
   const values = [];
   let i = 1;
@@ -114,24 +139,66 @@ router.patch('/:id', async (req, res) => {
   if (sets.length === 0) return res.status(400).json({ error: 'No hay campos para actualizar.' });
 
   values.push(req.params.id);
-  const { rows } = await pool.query(
-    `UPDATE usuarios SET ${sets.join(', ')} WHERE id = $${i}
-     RETURNING id, nombre, telefono, email, rol, sucursal_id, empresa_id, activo, created_at`,
-    values
-  );
+  let rows;
+  try {
+    ({ rows } = await pool.query(
+      `UPDATE usuarios SET ${sets.join(', ')} WHERE id = $${i}
+       RETURNING id, nombre, telefono, email, rol, sucursal_id, empresa_id, activo, created_at`,
+      values
+    ));
+  } catch (err) {
+    if (err.code === '23505') return res.status(409).json({ error: 'Ese correo ya está en uso por otra cuenta.' });
+    throw err;
+  }
   if (!rows[0]) return res.status(404).json({ error: 'Usuario no encontrado.' });
   res.json(rows[0]);
 });
 
+// El Administrador cambia la credencial de cualquiera; un Supervisor solo la de su propia empresa y nunca la de un
+// Administrador ni la de otro Supervisor (antes no se revisaba: un Supervisor podia cambiar el PIN del Administrador).
+function puedeGestionarCredenciales(quien, objetivo) {
+  if (quien.rol === 'dueño') return true;
+  return objetivo.rol !== 'dueño' && objetivo.rol !== 'admin' && objetivo.empresa_id === quien.empresa_id;
+}
+
+async function objetivoDeCredencial(req, res) {
+  const objetivo = (await pool.query('SELECT id, rol, empresa_id FROM usuarios WHERE id = $1', [req.params.id])).rows[0];
+  if (!objetivo) { res.status(404).json({ error: 'Usuario no encontrado.' }); return null; }
+  if (!puedeGestionarCredenciales(req.usuario, objetivo)) {
+    res.status(403).json({ error: 'No puedes cambiar la contraseña de esta cuenta.' });
+    return null;
+  }
+  return objetivo;
+}
+
+// Nueva contraseña de una cuenta (reemplaza a "Restablecer PIN"). El PIN anterior deja de servir.
+router.post('/:id/password', async (req, res) => {
+  const { password } = req.body ?? {};
+  if (!isValidPassword(password)) return res.status(400).json({ error: MENSAJE_PASSWORD });
+  if (!(await objetivoDeCredencial(req, res))) return;
+
+  await pool.query(
+    `UPDATE usuarios SET password_hash = $1, pin_hash = $2, intentos_fallidos = 0, bloqueado_hasta = NULL WHERE id = $3`,
+    [hashPassword(password), hashInservible(), req.params.id]
+  );
+  res.json({ ok: true });
+});
+
+// Version anterior de la app: restablecer el PIN. Mientras el PIN y la contraseña sean lo mismo, se cambian juntos;
+// si ya tiene una contraseña propia, esta no se toca.
 router.post('/:id/pin', async (req, res) => {
   const { pin } = req.body ?? {};
   if (!isValidPin(pin)) return res.status(400).json({ error: 'El PIN debe ser de 4 dígitos.' });
+  if (!(await objetivoDeCredencial(req, res))) return;
 
-  const { rowCount } = await pool.query(
-    `UPDATE usuarios SET pin_hash = $1, intentos_fallidos = 0, bloqueado_hasta = NULL WHERE id = $2`,
+  await pool.query(
+    `UPDATE usuarios
+     SET pin_hash = $1,
+         password_hash = CASE WHEN password_hash IS NULL OR password_hash = pin_hash THEN $1 ELSE password_hash END,
+         intentos_fallidos = 0, bloqueado_hasta = NULL
+     WHERE id = $2`,
     [hashPin(pin), req.params.id]
   );
-  if (!rowCount) return res.status(404).json({ error: 'Usuario no encontrado.' });
   res.json({ ok: true });
 });
 
