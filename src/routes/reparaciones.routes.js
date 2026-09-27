@@ -236,7 +236,7 @@ router.get('/:id', async (req, res) => {
 router.post('/', requireRole('admin', 'vendedor'), async (req, res) => {
   const {
     cliente_id, sucursal_id, telefono, telefono_adicional, equipo_marca, equipo_modelo, imei_equipo, equipo_contrasena, problema_reportado, prioridad,
-    equipo_enciende, origen_reparacion, producto_id, unidad_imei_id,
+    equipo_enciende, origen_reparacion, producto_id, unidad_imei_id, anticipo, anticipo_metodo,
   } = req.body ?? {};
 
   const esCompraPropia = origen_reparacion === 'compra_propia';
@@ -252,6 +252,15 @@ router.post('/', requireRole('admin', 'vendedor'), async (req, res) => {
     if (!telefono?.trim()) return res.status(400).json({ error: 'El teléfono de contacto es requerido.' });
   }
   if (!problema_reportado?.trim()) return res.status(400).json({ error: 'Describe el problema reportado.' });
+  // Anticipo opcional al recibir el equipo: dinero que el cliente deja de entrada, antes de que se
+  // sepa el costo final — se descuenta del total como cualquier otro abono (ver POST /:id/abonos).
+  const montoAnticipo = anticipo !== undefined && anticipo !== null && anticipo !== '' ? Number(anticipo) : 0;
+  if (montoAnticipo > 0) {
+    if (esCompraPropia) return res.status(400).json({ error: 'Un equipo propio (sin cliente) no puede tener anticipo.' });
+    if (!METODOS_PAGO_VALIDOS.includes(anticipo_metodo)) return res.status(400).json({ error: 'Selecciona el método de pago del anticipo.' });
+  } else if (anticipo !== undefined && anticipo !== null && anticipo !== '' && !(montoAnticipo >= 0)) {
+    return res.status(400).json({ error: 'El anticipo debe ser un número mayor o igual a 0.' });
+  }
   // Opcional a nivel de API (un cliente de la app anterior a este campo no lo
   // manda); la app nueva lo pide como obligatorio en la recepcion.
   if (equipo_enciende !== undefined && equipo_enciende !== null && typeof equipo_enciende !== 'boolean') {
@@ -290,14 +299,29 @@ router.post('/', requireRole('admin', 'vendedor'), async (req, res) => {
       ]
     );
 
+    const notaRecepcion = esCompraPropia
+      ? 'Equipo propio ingresado a revisión antes de publicarse en catálogo.'
+      : montoAnticipo > 0
+        ? `Equipo recibido en mostrador. Anticipo: ${montoAnticipo.toFixed(2)}.`
+        : 'Equipo recibido en mostrador.';
     await client.query(
       `INSERT INTO reparacion_historial (reparacion_id, estado, nota, usuario_id)
        VALUES ($1, 'recibido', $2, $3)`,
-      [reparacion.rows[0].id, esCompraPropia ? 'Equipo propio ingresado a revisión antes de publicarse en catálogo.' : 'Equipo recibido en mostrador.', req.usuario.sub]
+      [reparacion.rows[0].id, notaRecepcion, req.usuario.sub]
     );
 
+    if (montoAnticipo > 0) {
+      await client.query(
+        `INSERT INTO reparacion_abonos (reparacion_id, monto, metodo, usuario_id) VALUES ($1, $2, $3, $4)`,
+        [reparacion.rows[0].id, montoAnticipo, anticipo_metodo, req.usuario.sub]
+      );
+      // El total todavia es 0 (nadie ha diagnosticado el costo): a diferencia de POST /:id/abonos, aqui no hay
+      // saldo contra el que comparar — el anticipo se descontara del total en cuanto se capture.
+      await client.query(`UPDATE reparaciones SET monto_pagado = $1 WHERE id = $2`, [montoAnticipo, reparacion.rows[0].id]);
+    }
+
     await client.query('COMMIT');
-    res.status(201).json(reparacion.rows[0]);
+    res.status(201).json({ ...reparacion.rows[0], monto_pagado: montoAnticipo });
   } catch (err) {
     await client.query('ROLLBACK');
     console.error(err);
