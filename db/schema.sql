@@ -444,6 +444,10 @@ CREATE TABLE cambios_equipo (
   valor_ofrecido    numeric(12,2) NOT NULL DEFAULT 0,
   estado            estado_cambio_equipo NOT NULL DEFAULT 'evaluando',
   producto_id       uuid REFERENCES productos(id),
+  -- Si se cerro aplicando su valor como credito a una venta nueva (ver POST /ventas,
+  -- cambio_equipo_id): la venta donde se descontó. Excluyente con producto_id -- un cambio
+  -- aceptado se cierra de una sola forma, nunca ambas.
+  venta_id          uuid REFERENCES ventas(id),
   usuario_id        uuid REFERENCES usuarios(id),
   created_at        timestamptz NOT NULL DEFAULT now(),
   updated_at        timestamptz NOT NULL DEFAULT now()

@@ -8,19 +8,22 @@ router.use(requireAuth, requireRole('admin', 'vendedor'));
 const GRADOS_VALIDOS = ['A', 'B', 'C', 'D', 'otro'];
 
 router.get('/', async (req, res) => {
-  const { sucursal_id, estado } = req.query;
+  const { sucursal_id, estado, cliente_id } = req.query;
   // Admin y dueño pueden omitir sucursal_id (ven las evaluaciones de todas
   // las sucursales); vendedor lo sigue necesitando, igual que siempre.
   if (!sucursal_id && !esAdminODueno(req.usuario.rol)) return res.status(400).json({ error: 'sucursal_id es requerido.' });
 
   const { rows } = await pool.query(
-    `SELECT id, cliente_id, cliente_nombre, equipo_modelo, grado, grado_detalle, bateria_pct,
-            pantalla_ok, cuerpo_ok, camaras_ok, botones_ok, checklist_revision,
-            valor_referencia, valor_ofrecido, estado, producto_id, created_at, updated_at
-     FROM cambios_equipo
-     WHERE ($1::uuid IS NULL OR sucursal_id = $1::uuid) AND ($2::text IS NULL OR estado::text = $2)
-     ORDER BY created_at DESC`,
-    [sucursal_id || null, estado || null]
+    `SELECT ce.id, ce.cliente_id, ce.cliente_nombre, ce.equipo_modelo, ce.grado, ce.grado_detalle, ce.bateria_pct,
+            ce.pantalla_ok, ce.cuerpo_ok, ce.camaras_ok, ce.botones_ok, ce.checklist_revision,
+            ce.valor_referencia, ce.valor_ofrecido, ce.estado, ce.producto_id, ce.venta_id, v.folio AS venta_folio,
+            ce.created_at, ce.updated_at
+     FROM cambios_equipo ce
+     LEFT JOIN ventas v ON v.id = ce.venta_id
+     WHERE ($1::uuid IS NULL OR ce.sucursal_id = $1::uuid) AND ($2::text IS NULL OR ce.estado::text = $2)
+       AND ($3::uuid IS NULL OR ce.cliente_id = $3::uuid)
+     ORDER BY ce.created_at DESC`,
+    [sucursal_id || null, estado || null, cliente_id || null]
   );
   res.json(rows);
 });
@@ -101,16 +104,6 @@ router.patch('/:id/rechazar', async (req, res) => {
     [req.params.id]
   );
   if (!rows[0]) return res.status(409).json({ error: 'Solo se puede rechazar una evaluación en curso.' });
-  res.json(rows[0]);
-});
-
-router.patch('/:id/aplicar-a-venta', async (req, res) => {
-  const { rows } = await pool.query(
-    `UPDATE cambios_equipo SET estado = 'completado' WHERE id = $1 AND estado = 'aceptado'
-     RETURNING id, estado, valor_ofrecido`,
-    [req.params.id]
-  );
-  if (!rows[0]) return res.status(409).json({ error: 'Solo se puede aplicar un cambio ya aceptado.' });
   res.json(rows[0]);
 });
 

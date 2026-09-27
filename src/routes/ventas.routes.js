@@ -145,7 +145,7 @@ router.get('/:id', async (req, res) => {
 });
 
 router.post('/', async (req, res) => {
-  const { sucursal_id, cliente_id, metodo_pago, items, limite_aprobado, condiciones } = req.body ?? {};
+  const { sucursal_id, cliente_id, metodo_pago, items, limite_aprobado, condiciones, cambio_equipo_id } = req.body ?? {};
 
   if (!sucursal_id) return res.status(400).json({ error: 'sucursal_id es requerido.' });
   if (!METODOS_VALIDOS.includes(metodo_pago)) return res.status(400).json({ error: 'Método de pago inválido.' });
@@ -252,7 +252,35 @@ router.post('/', async (req, res) => {
     if (descuentoSolicitado < 0 || descuentoSolicitado > subtotal) {
       throw Object.assign(new Error('El descuento debe ser mayor o igual a 0 y no puede superar el subtotal.'), { statusCode: 400 });
     }
-    const descuento = descuentoSolicitado;
+
+    // Cambio de equipo por dinero aplicado como credito a esta venta (ver cambiosEquipo.routes.js):
+    // el valor NUNCA se toma del body -- se relee y se bloquea (FOR UPDATE) de cambios_equipo, igual
+    // que el precio de cada producto se toma siempre del catalogo y nunca de lo que mande el cliente.
+    let creditoCambio = 0;
+    let cambioEquipo = null;
+    if (cambio_equipo_id) {
+      const cambioResult = await client.query(
+        `SELECT id, cliente_id, valor_ofrecido, estado FROM cambios_equipo WHERE id = $1 AND sucursal_id = $2 FOR UPDATE`,
+        [cambio_equipo_id, sucursal_id]
+      );
+      cambioEquipo = cambioResult.rows[0];
+      if (!cambioEquipo) throw Object.assign(new Error('El cambio de equipo no existe en esta sucursal.'), { statusCode: 404 });
+      if (cambioEquipo.estado !== 'aceptado') {
+        throw Object.assign(new Error('Ese cambio de equipo ya no está disponible para aplicarse (no está aceptado o ya se usó).'), { statusCode: 409 });
+      }
+      if (!cliente_id || cambioEquipo.cliente_id !== cliente_id) {
+        throw Object.assign(new Error('El cambio de equipo seleccionado no es de este cliente.'), { statusCode: 400 });
+      }
+      creditoCambio = Number(cambioEquipo.valor_ofrecido);
+    }
+
+    const descuento = descuentoSolicitado + creditoCambio;
+    if (descuento > subtotal) {
+      throw Object.assign(
+        new Error(`El descuento y el cambio de equipo ($${creditoCambio.toFixed(2)}) juntos superan el total de la venta.`),
+        { statusCode: 400 }
+      );
+    }
     const total = subtotal - descuento;
 
     const ventaResult = await client.query(
@@ -333,6 +361,10 @@ router.post('/', async (req, res) => {
       credito = creditoResult.rows[0];
     }
 
+    if (cambioEquipo) {
+      await client.query(`UPDATE cambios_equipo SET estado = 'completado', venta_id = $1 WHERE id = $2`, [venta.id, cambioEquipo.id]);
+    }
+
     await client.query('COMMIT');
 
     const contexto = await client.query(
@@ -352,6 +384,7 @@ router.post('/', async (req, res) => {
       folio: venta.folio,
       subtotal,
       descuento,
+      credito_cambio_equipo: creditoCambio || null,
       total,
       metodo_pago,
       credito,
