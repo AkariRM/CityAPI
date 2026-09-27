@@ -17,6 +17,16 @@ const LIMITES_AGENTE = {
 // Codigo que puede llevar la calcomania de equipo (igual que el CHECK de la tabla).
 const CODIGOS_CALCOMANIA = ['barras', 'qr'];
 
+// Motor de valor recomendado de "Cambio de equipo por dinero": mismo criterio que LIMITES_AGENTE, pero
+// para los numeros decimales que ajusta el Administrador (deducciones en pesos y los dos porcentajes).
+const LIMITES_MOTOR_VALOR = {
+  cambio_equipo_deduccion_alta: { min: 0, max: 999999, texto: 'La deducción alta del checklist' },
+  cambio_equipo_deduccion_media: { min: 0, max: 999999, texto: 'La deducción media del checklist' },
+  cambio_equipo_deduccion_baja: { min: 0, max: 999999, texto: 'La deducción baja del checklist' },
+  cambio_equipo_factor_bloqueado: { min: 0, max: 1, texto: 'El factor de equipo bloqueado' },
+  cambio_equipo_estetica_pct: { min: 0, max: 1, texto: 'El porcentaje por punto de estética' },
+};
+
 // Cualquier rol autenticado puede LEER la configuracion (Equipos la
 // necesita para saber si debe auto-imprimir el sticker al dar de alta un
 // equipo, sin importar que rol lo esta registrando) -- solo modificarla
@@ -43,6 +53,11 @@ router.patch('/', requireRole('admin'), async (req, res) => {
     agente_apartado_horas: req.body?.agente_apartado_horas,
     agente_apartado_max_por_telefono: req.body?.agente_apartado_max_por_telefono,
     calcomania_equipo_codigo: req.body?.calcomania_equipo_codigo,
+    cambio_equipo_deduccion_alta: req.body?.cambio_equipo_deduccion_alta,
+    cambio_equipo_deduccion_media: req.body?.cambio_equipo_deduccion_media,
+    cambio_equipo_deduccion_baja: req.body?.cambio_equipo_deduccion_baja,
+    cambio_equipo_factor_bloqueado: req.body?.cambio_equipo_factor_bloqueado,
+    cambio_equipo_estetica_pct: req.body?.cambio_equipo_estetica_pct,
   };
   if (fields.calcomania_equipo_codigo !== undefined && !CODIGOS_CALCOMANIA.includes(fields.calcomania_equipo_codigo)) {
     return res.status(400).json({ error: "El código de la calcomanía debe ser 'barras' o 'qr'." });
@@ -51,6 +66,12 @@ router.patch('/', requireRole('admin'), async (req, res) => {
     const v = fields[campo];
     if (v !== undefined && !(Number.isInteger(v) && v >= min && v <= max)) {
       return res.status(400).json({ error: `${texto} debe ser un número entero entre ${min} y ${max}.` });
+    }
+  }
+  for (const [campo, { min, max, texto }] of Object.entries(LIMITES_MOTOR_VALOR)) {
+    const v = fields[campo];
+    if (v !== undefined && !(typeof v === 'number' && Number.isFinite(v) && v >= min && v <= max)) {
+      return res.status(400).json({ error: `${texto} debe ser un número entre ${min} y ${max}.` });
     }
   }
   const sets = [];

@@ -925,6 +925,19 @@ CREATE TABLE configuracion_ticket (
   -- Codigo que lleva impresa la calcomania de equipo: 'barras' (Code 128 con el IMEI, para lector
   -- de codigo de barras) o 'qr' (ver migracion_calcomania_equipo_codigo.sql).
   calcomania_equipo_codigo    text NOT NULL DEFAULT 'barras' CHECK (calcomania_equipo_codigo IN ('barras', 'qr')),
+  -- Motor de valor recomendado de "Cambio de equipo por dinero" (ver cambios_equipo /
+  -- NuevaEvaluacionModal.jsx): cuanto se descuenta, en pesos, por cada punto del checklist de
+  -- revision que falle. Se agrupan en 3 niveles porque no todas las piezas cuestan igual reparar
+  -- (camara/Face ID/touch > botones/altavoz/microfono > el resto).
+  cambio_equipo_deduccion_alta   numeric(12,2) NOT NULL DEFAULT 400 CHECK (cambio_equipo_deduccion_alta >= 0),
+  cambio_equipo_deduccion_media  numeric(12,2) NOT NULL DEFAULT 150 CHECK (cambio_equipo_deduccion_media >= 0),
+  cambio_equipo_deduccion_baja   numeric(12,2) NOT NULL DEFAULT 80 CHECK (cambio_equipo_deduccion_baja >= 0),
+  -- Un equipo bloqueado con una compañia vale menos (no se puede revender de inmediato): que
+  -- fraccion de su valor se ofrece (0.5 = la mitad). 1 = como si estuviera libre.
+  cambio_equipo_factor_bloqueado numeric(4,3) NOT NULL DEFAULT 0.5 CHECK (cambio_equipo_factor_bloqueado BETWEEN 0 AND 1),
+  -- Por cada punto de estetica (1-10, ver ChecklistRevisionEquipo.jsx) por debajo de 8, se resta
+  -- este porcentaje del valor. 0.03 = 3% por punto.
+  cambio_equipo_estetica_pct     numeric(5,4) NOT NULL DEFAULT 0.03 CHECK (cambio_equipo_estetica_pct BETWEEN 0 AND 1),
   updated_at                  timestamptz NOT NULL DEFAULT now()
 );
 
