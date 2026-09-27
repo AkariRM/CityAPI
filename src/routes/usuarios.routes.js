@@ -202,4 +202,160 @@ router.post('/:id/pin', async (req, res) => {
   res.json({ ok: true });
 });
 
+// ─────────────────────────────────────────────────────────────────────────────
+// Eliminar un usuario (solo el Administrador). Para cuando alguien deja de trabajar aquí (despido,
+// renuncia): la cuenta se borra (ya no puede entrar, desaparece de las listas), pero su historial
+// (ventas, reparaciones, cortes de caja, nóminas...) NO se pierde — se conserva registrado a nombre de
+// quien tú elijas (reasignar_a), igual que ya hace "Eliminar" en Sucursales con el historial de una
+// sucursal. Es DEFINITIVO.
+//
+// Las tablas que apuntan a usuarios se descubren en el catalogo de Postgres, asi una tabla nueva no se
+// queda sin mover. sesiones y notificaciones se borran (no son "historial", son solo su sesión propia).
+// ─────────────────────────────────────────────────────────────────────────────
+
+const ETIQUETA_TABLA_USUARIO = {
+  ventas: 'ventas',
+  cambios: 'cambios de producto',
+  cortes_caja: 'cortes de caja',
+  creditos: 'créditos autorizados',
+  abonos: 'abonos de crédito',
+  reparaciones: 'reparaciones asignadas',
+  reparacion_abonos: 'cobros de reparación',
+  reparacion_solicitudes_pieza: 'piezas solicitadas',
+  reparacion_historial: 'movimientos en el historial de reparaciones',
+  reparacion_traslados: 'traslados de reparación',
+  nominas: 'nóminas',
+  gastos: 'gastos registrados',
+  cambios_equipo: 'cambios de equipo',
+  ordenes_compra: 'órdenes de compra',
+  movimientos_inventario: 'movimientos de inventario',
+  movimientos_refacciones: 'movimientos de refacciones',
+  apartados: 'apartados',
+  fila_espera: 'fila de espera',
+  auditoria: 'registros de auditoría',
+  publicaciones: 'publicaciones',
+  marketplace_listados: 'publicaciones de marketplace',
+  comentarios_redes: 'comentarios respondidos',
+  opciones_equipo: 'opciones de equipo creadas',
+  aurea_ventas: 'ventas de Áurea',
+  aurea_apartados: 'apartados de Áurea',
+  aurea_apartado_abonos: 'abonos de apartado (Áurea)',
+  aurea_cortes_caja: 'cortes de caja de Áurea',
+  aurea_gastos: 'gastos de Áurea',
+  aurea_movimientos_inventario: 'movimientos de inventario de Áurea',
+};
+
+async function tablasLigadasAUsuario(db) {
+  const { rows } = await db.query(
+    `SELECT c.conrelid::regclass::text AS tabla, a.attname AS columna
+     FROM pg_constraint c
+     JOIN pg_attribute a ON a.attrelid = c.conrelid AND a.attnum = c.conkey[1]
+     WHERE c.contype = 'f' AND c.confrelid = 'usuarios'::regclass AND array_length(c.conkey, 1) = 1
+     ORDER BY 1`
+  );
+  return rows.filter((r) => r.tabla !== 'sesiones' && r.tabla !== 'notificaciones');
+}
+
+async function historialDeUsuario(db, id) {
+  const historial = [];
+  for (const { tabla, columna } of await tablasLigadasAUsuario(db)) {
+    const n = (await db.query(`SELECT count(*)::int AS n FROM ${tabla} WHERE ${columna} = $1`, [id])).rows[0].n;
+    if (n > 0) historial.push({ tabla, etiqueta: ETIQUETA_TABLA_USUARIO[tabla] ?? tabla, cantidad: n });
+  }
+  return { historial, total_historial: historial.reduce((suma, h) => suma + h.cantidad, 0) };
+}
+
+// Qué se movería / borraría, para mostrarlo antes de confirmar.
+router.get('/:id/impacto', requireRole('dueño'), async (req, res) => {
+  const usuario = (await pool.query(`SELECT id, nombre, rol FROM usuarios WHERE id = $1`, [req.params.id])).rows[0];
+  if (!usuario) return res.status(404).json({ error: 'Usuario no encontrado.' });
+  const otros = (await pool.query(`SELECT count(*)::int AS n FROM usuarios WHERE id <> $1 AND activo = true`, [req.params.id])).rows[0].n;
+  res.json({ usuario, otros_usuarios_activos: otros, ...(await historialDeUsuario(pool, req.params.id)) });
+});
+
+router.delete('/:id', requireRole('dueño'), async (req, res) => {
+  const { reasignar_a, confirmar } = req.body ?? {};
+  if (req.params.id === req.usuario.sub) return res.status(400).json({ error: 'No puedes eliminar tu propia cuenta.' });
+
+  const client = await pool.connect();
+  try {
+    await client.query('BEGIN');
+
+    const usuario = (await client.query(`SELECT id, nombre, rol FROM usuarios WHERE id = $1 FOR UPDATE`, [req.params.id])).rows[0];
+    if (!usuario) {
+      await client.query('ROLLBACK');
+      return res.status(404).json({ error: 'Usuario no encontrado.' });
+    }
+    if (String(confirmar ?? '').trim() !== usuario.nombre.trim()) {
+      await client.query('ROLLBACK');
+      return res.status(400).json({ error: 'Escribe el nombre exacto del usuario para confirmar.' });
+    }
+    if (usuario.rol === 'dueño') {
+      const otrosDuenos = (await client.query(`SELECT count(*)::int AS n FROM usuarios WHERE rol = 'dueño' AND id <> $1`, [usuario.id])).rows[0].n;
+      if (otrosDuenos === 0) {
+        await client.query('ROLLBACK');
+        return res.status(409).json({ error: 'No puedes eliminar al único Administrador.' });
+      }
+    }
+
+    const { historial, total_historial } = await historialDeUsuario(client, usuario.id);
+    let destino = null;
+    if (total_historial > 0) {
+      if (!reasignar_a) {
+        await client.query('ROLLBACK');
+        return res.status(409).json({
+          error: 'Este usuario tiene historial: elige a quién se le reasigna para poder eliminarlo.',
+          requiere_destino: true,
+          historial,
+        });
+      }
+      if (reasignar_a === usuario.id) {
+        await client.query('ROLLBACK');
+        return res.status(400).json({ error: 'El destino tiene que ser otro usuario.' });
+      }
+      destino = (await client.query(`SELECT id, nombre FROM usuarios WHERE id = $1 AND activo = true`, [reasignar_a])).rows[0];
+      if (!destino) {
+        await client.query('ROLLBACK');
+        return res.status(400).json({ error: 'El usuario destino no existe o está inactivo.' });
+      }
+    }
+
+    // El historial pasa al destino elegido (o se queda sin dueño si nadie lo tiene, cosa que aquí no pasa: solo se
+    // llega hasta aquí con destino cuando hay historial).
+    if (destino) {
+      for (const { tabla, columna } of await tablasLigadasAUsuario(client)) {
+        await client.query(`UPDATE ${tabla} SET ${columna} = $2 WHERE ${columna} = $1`, [usuario.id, destino.id]);
+      }
+    }
+
+    await client.query(`DELETE FROM sesiones WHERE usuario_id = $1`, [usuario.id]);
+    await client.query(`DELETE FROM notificaciones WHERE usuario_id = $1`, [usuario.id]);
+    await client.query(`DELETE FROM usuarios WHERE id = $1`, [usuario.id]);
+
+    await client.query(
+      `INSERT INTO auditoria (usuario_id, accion, entidad, entidad_id, datos_previos, datos_nuevos)
+       VALUES ($1, 'eliminar', 'usuario', $2, $3, $4)`,
+      [
+        req.usuario.sub,
+        usuario.id,
+        JSON.stringify({ nombre: usuario.nombre, rol: usuario.rol }),
+        JSON.stringify({ reasignado_a: destino?.nombre ?? null, historial }),
+      ]
+    );
+
+    await client.query('COMMIT');
+    res.json({ eliminado: true, nombre: usuario.nombre, reasignado_a: destino?.nombre ?? null, historial });
+  } catch (err) {
+    await client.query('ROLLBACK').catch(() => {});
+    if (err.code === '23503') {
+      const ligada = /table "([^"]+)"/.exec(err.detail ?? '')?.[1] ?? 'otra tabla';
+      return res.status(409).json({ error: `No se pudo eliminar: aún hay datos ligados (${ligada}). No se borró nada.` });
+    }
+    console.error(err);
+    res.status(500).json({ error: 'Error interno del servidor.' });
+  } finally {
+    client.release();
+  }
+});
+
 module.exports = router;
