@@ -21,20 +21,20 @@
 --   - gastos generales (compras de refacciones, renta, etc.) ni sueldos
 --   - los archivos de las fotos en Storage (SQL no los puede borrar; son solo de prueba)
 --
--- Todo corre en una transacción: si algo falla a la mitad, no se borra nada. Ejecutar en el SQL
--- Editor de Supabase.
+-- Todo va en UN solo bloque (una sentencia = atómica): si algo falla a la mitad, no se borra nada.
+-- No usa BEGIN/COMMIT porque el editor de Supabase corre cada sentencia por separado.
+-- Ejecutar en el SQL Editor de Supabase.
 
-BEGIN;
+DO $$
+BEGIN
+  DELETE FROM gastos
+  WHERE categoria = 'Piezas de reparación'
+    AND descripcion LIKE 'Pieza de reparación folio %';
 
-DELETE FROM gastos
-WHERE categoria = 'Piezas de reparación'
-  AND descripcion LIKE 'Pieza de reparación folio %';
+  DELETE FROM reparaciones;
 
-DELETE FROM reparaciones;
-
-ALTER SEQUENCE reparaciones_folio_seq RESTART WITH 1;
-
-COMMIT;
+  ALTER SEQUENCE reparaciones_folio_seq RESTART WITH 1;
+END $$;
 
 -- Verificación: todo debe salir en 0.
 SELECT 'reparaciones' AS tabla, count(*) AS quedan FROM reparaciones

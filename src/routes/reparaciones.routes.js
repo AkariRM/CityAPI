@@ -359,7 +359,7 @@ router.patch('/:id', async (req, res) => {
         return res.status(409).json({ error: MENSAJE_FUERA_DEL_TALLER[actual.ubicacion] });
       }
       if (cambiaEstado && !ESTADOS_DEL_TALLER.includes(b.estado)) {
-        return res.status(403).json({ error: 'El taller solo marca diagnóstico, esperando autorización, en reparación y listo.' });
+        return res.status(403).json({ error: 'El taller solo marca diagnóstico, autorizado, en reparación y listo.' });
       }
     } else {
       // La sucursal entrega y cancela; el diagnostico y los pasos del taller los captura el taller.
