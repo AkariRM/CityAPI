@@ -95,6 +95,12 @@ CREATE TABLE sucursales (
   direccion           text,
   telefono            text,
   fondo_caja_default  numeric(12,2) NOT NULL DEFAULT 0,
+  -- 'compartida': un solo cajon fisico para toda la sucursal -- el corte de caja suma lo que
+  -- vendio/cobro CUALQUIERA que haya trabajado ahi durante el turno, sin importar quien lo cierre.
+  -- 'individual': cada cajero cuenta y cuadra su propio cajon -- el corte de cada quien solo ve lo
+  -- que el mismo vendio (comportamiento original, antes de que existiera esta columna).
+  -- Ver cortes_caja.routes.js.
+  modo_caja           text NOT NULL DEFAULT 'compartida' CHECK (modo_caja IN ('compartida', 'individual')),
   activo              boolean NOT NULL DEFAULT true,
   created_at          timestamptz NOT NULL DEFAULT now(),
   updated_at          timestamptz NOT NULL DEFAULT now()

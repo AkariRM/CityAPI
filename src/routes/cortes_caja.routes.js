@@ -7,7 +7,88 @@ const router = express.Router();
 
 router.use(requireAuth, requireRole('admin', 'vendedor'));
 
-async function calcularResumen(sucursal_id, usuario_id) {
+async function obtenerModoCaja(sucursal_id) {
+  const { rows } = await pool.query(`SELECT modo_caja FROM sucursales WHERE id = $1`, [sucursal_id]);
+  return rows[0]?.modo_caja ?? 'compartida';
+}
+
+// Sucursal de un solo cajon fisico: el turno y el resumen son de la sucursal completa, sin
+// importar quien vendio o quien cierra -- lo contrario a "individual" (ver abajo), que es el
+// comportamiento original de un cajon por cajero.
+async function calcularResumenCompartida(sucursal_id) {
+  const ultimoCorte = await pool.query(
+    `SELECT turno_fin FROM cortes_caja WHERE sucursal_id = $1 ORDER BY turno_fin DESC LIMIT 1`,
+    [sucursal_id]
+  );
+  const desde = ultimoCorte.rows[0]?.turno_fin ?? null;
+
+  const ventasPorMetodo = await pool.query(
+    `SELECT metodo_pago, count(*)::int AS cantidad, COALESCE(sum(total), 0) AS total
+     FROM ventas
+     WHERE sucursal_id = $1 AND estado = 'completada'
+       AND created_at > COALESCE($2::timestamptz, date_trunc('day', now()))
+     GROUP BY metodo_pago`,
+    [sucursal_id, desde]
+  );
+
+  // Un abono de credito se atribuye a esta sucursal via la venta que origino el credito. Un
+  // credito otorgado directo (sin venta, ver NuevoCreditoModal) no trae sucursal en su propio
+  // registro -- para esos, cuenta si quien cobro el abono vendio o registro un gasto en esta
+  // sucursal durante el mismo turno (mismo criterio de "trabajo aqui este turno").
+  const abonosPorMetodo = await pool.query(
+    `SELECT a.metodo, count(*)::int AS cantidad, COALESCE(sum(a.monto), 0) AS total
+     FROM abonos a
+     JOIN creditos c ON c.id = a.credito_id
+     LEFT JOIN ventas v ON v.id = c.venta_id
+     WHERE a.created_at > COALESCE($2::timestamptz, date_trunc('day', now()))
+       AND (
+         v.sucursal_id = $1
+         OR (
+           v.id IS NULL AND a.usuario_id IN (
+             SELECT vendedor_id FROM ventas WHERE sucursal_id = $1 AND created_at > COALESCE($2::timestamptz, date_trunc('day', now()))
+             UNION
+             SELECT usuario_id FROM gastos WHERE sucursal_id = $1 AND usuario_id IS NOT NULL AND created_at > COALESCE($2::timestamptz, date_trunc('day', now()))
+           )
+         )
+       )
+     GROUP BY a.metodo`,
+    [sucursal_id, desde]
+  );
+  const abonosApartadoPorMetodo = await pool.query(
+    `SELECT aa.metodo, count(*)::int AS cantidad, COALESCE(sum(aa.monto), 0) AS total
+     FROM apartado_abonos aa
+     JOIN apartados ap ON ap.id = aa.apartado_id
+     WHERE ap.sucursal_id = $1
+       AND aa.created_at > COALESCE($2::timestamptz, date_trunc('day', now()))
+     GROUP BY aa.metodo`,
+    [sucursal_id, desde]
+  );
+  const abonosReparacionPorMetodo = await pool.query(
+    `SELECT ra.metodo, count(*)::int AS cantidad, COALESCE(sum(ra.monto), 0) AS total
+     FROM reparacion_abonos ra
+     JOIN reparaciones r ON r.id = ra.reparacion_id
+     WHERE r.sucursal_id = $1
+       AND ra.created_at > COALESCE($2::timestamptz, date_trunc('day', now()))
+     GROUP BY ra.metodo`,
+    [sucursal_id, desde]
+  );
+
+  const salidas = await pool.query(
+    `SELECT id, tipo, categoria, monto, descripcion, created_at
+     FROM gastos
+     WHERE sucursal_id = $1
+       AND created_at > COALESCE($2::timestamptz, date_trunc('day', now()))
+     ORDER BY created_at`,
+    [sucursal_id, desde]
+  );
+
+  return armarResumen({ desde, ventasPorMetodo, abonosPorMetodo, abonosApartadoPorMetodo, abonosReparacionPorMetodo, salidas });
+}
+
+// Cajon por cajero: el turno de CADA usuario es desde su propio ultimo corte, y el resumen solo
+// suma lo que el mismo vendio/cobro -- comportamiento original, para sucursales donde cada quien
+// cuenta y cuadra su propio dinero por separado.
+async function calcularResumenIndividual(sucursal_id, usuario_id) {
   const ultimoCorte = await pool.query(
     `SELECT turno_fin FROM cortes_caja WHERE sucursal_id = $1 AND usuario_id = $2 ORDER BY turno_fin DESC LIMIT 1`,
     [sucursal_id, usuario_id]
@@ -66,6 +147,11 @@ async function calcularResumen(sucursal_id, usuario_id) {
      ORDER BY created_at`,
     [sucursal_id, usuario_id, desde]
   );
+
+  return armarResumen({ desde, ventasPorMetodo, abonosPorMetodo, abonosApartadoPorMetodo, abonosReparacionPorMetodo, salidas });
+}
+
+function armarResumen({ desde, ventasPorMetodo, abonosPorMetodo, abonosApartadoPorMetodo, abonosReparacionPorMetodo, salidas }) {
   const totalSalidas = salidas.rows.reduce((sum, s) => sum + Number(s.monto), 0);
 
   const totales = { efectivo: 0, tarjeta: 0, credito: 0 };
@@ -101,16 +187,28 @@ async function calcularResumen(sucursal_id, usuario_id) {
   };
 }
 
+async function calcularResumen(sucursal_id, usuario_id, modoCaja) {
+  return modoCaja === 'individual'
+    ? calcularResumenIndividual(sucursal_id, usuario_id)
+    : calcularResumenCompartida(sucursal_id);
+}
+
 // Listado/historial de cortes (turnos) para la pantalla de Historial de
-// ventas. Igual que en /ventas, un vendedor solo ve sus propios cortes; el
-// admin puede ver los de cualquiera o los de todos.
+// ventas. En modo individual, un vendedor solo ve sus propios cortes (el
+// admin puede ver los de cualquiera o los de todos); en modo compartida no
+// hay "propios" que filtrar -- son cortes de la sucursal completa, cualquiera
+// que tenga acceso a caja ahi los ve todos.
 router.get('/', async (req, res) => {
   const { sucursal_id, usuario_id, desde, hasta } = req.query;
   // Admin y dueño pueden omitir sucursal_id (ven los cortes de todas las
   // sucursales combinados); vendedor lo sigue necesitando, igual que siempre.
   if (!sucursal_id && !esAdminODueno(req.usuario.rol)) return res.status(400).json({ error: 'sucursal_id es requerido.' });
 
-  const usuarioFiltro = req.usuario.rol === 'vendedor' ? req.usuario.sub : usuario_id || null;
+  let usuarioFiltro = usuario_id || null;
+  if (req.usuario.rol === 'vendedor') {
+    const modoCaja = sucursal_id ? await obtenerModoCaja(sucursal_id) : 'individual';
+    usuarioFiltro = modoCaja === 'individual' ? req.usuario.sub : null;
+  }
 
   const { rows } = await pool.query(
     `SELECT cc.id, cc.sucursal_id, cc.usuario_id, u.nombre AS usuario_nombre,
@@ -132,9 +230,11 @@ router.get('/', async (req, res) => {
 router.get('/resumen', async (req, res) => {
   const { sucursal_id } = req.query;
   if (!sucursal_id) return res.status(400).json({ error: 'sucursal_id es requerido.' });
-  const resumen = await calcularResumen(sucursal_id, req.usuario.sub);
-  const sucursal = await pool.query(`SELECT fondo_caja_default FROM sucursales WHERE id = $1`, [sucursal_id]);
-  res.json({ ...resumen, fondo_caja_default: sucursal.rows[0]?.fondo_caja_default ?? 0 });
+  const sucursal = await pool.query(`SELECT fondo_caja_default, modo_caja FROM sucursales WHERE id = $1`, [sucursal_id]);
+  if (!sucursal.rows[0]) return res.status(404).json({ error: 'Sucursal no encontrada.' });
+  const modoCaja = sucursal.rows[0].modo_caja;
+  const resumen = await calcularResumen(sucursal_id, req.usuario.sub, modoCaja);
+  res.json({ ...resumen, fondo_caja_default: sucursal.rows[0].fondo_caja_default ?? 0, modo_caja: modoCaja });
 });
 
 router.post('/', async (req, res) => {
@@ -142,7 +242,8 @@ router.post('/', async (req, res) => {
   if (!sucursal_id) return res.status(400).json({ error: 'sucursal_id es requerido.' });
   if (!(efectivo_contado >= 0)) return res.status(400).json({ error: 'efectivo_contado es requerido.' });
 
-  const resumen = await calcularResumen(sucursal_id, req.usuario.sub);
+  const modoCaja = await obtenerModoCaja(sucursal_id);
+  const resumen = await calcularResumen(sucursal_id, req.usuario.sub, modoCaja);
   const fondo = fondo_inicial ?? 0;
   const diferencia = efectivo_contado - (fondo + resumen.total_efectivo - resumen.total_salidas);
 

@@ -18,7 +18,7 @@ router.get('/', async (req, res) => {
   // para poder ver y reactivar las dadas de baja.
   const filtro = activo === undefined ? true : activo === 'todas' ? null : activo === 'true';
   const { rows } = await pool.query(
-    `SELECT id, nombre, direccion, telefono, fondo_caja_default, activo FROM sucursales
+    `SELECT id, nombre, direccion, telefono, fondo_caja_default, modo_caja, activo FROM sucursales
      WHERE ($1::boolean IS NULL OR activo = $1::boolean)
      ORDER BY nombre`,
     [filtro]
@@ -26,24 +26,34 @@ router.get('/', async (req, res) => {
   res.json(rows);
 });
 
+const MODOS_CAJA_VALIDOS = ['compartida', 'individual'];
+
 router.post('/', requireRole('admin'), async (req, res) => {
-  const { nombre, direccion, telefono, fondo_caja_default } = req.body ?? {};
+  const { nombre, direccion, telefono, fondo_caja_default, modo_caja } = req.body ?? {};
   if (!nombre?.trim()) return res.status(400).json({ error: 'El nombre es requerido.' });
+  if (modo_caja !== undefined && !MODOS_CAJA_VALIDOS.includes(modo_caja)) {
+    return res.status(400).json({ error: 'Modo de caja inválido.' });
+  }
 
   const { rows } = await pool.query(
-    `INSERT INTO sucursales (nombre, direccion, telefono, fondo_caja_default) VALUES ($1, $2, $3, $4)
-     RETURNING id, nombre, direccion, telefono, fondo_caja_default, activo`,
-    [nombre.trim(), direccion || null, telefono || null, Number(fondo_caja_default) || 0]
+    `INSERT INTO sucursales (nombre, direccion, telefono, fondo_caja_default, modo_caja)
+     VALUES ($1, $2, $3, $4, COALESCE($5, 'compartida'))
+     RETURNING id, nombre, direccion, telefono, fondo_caja_default, modo_caja, activo`,
+    [nombre.trim(), direccion || null, telefono || null, Number(fondo_caja_default) || 0, modo_caja || null]
   );
   res.status(201).json(rows[0]);
 });
 
 router.patch('/:id', requireRole('admin'), async (req, res) => {
+  if (req.body?.modo_caja !== undefined && !MODOS_CAJA_VALIDOS.includes(req.body.modo_caja)) {
+    return res.status(400).json({ error: 'Modo de caja inválido.' });
+  }
   const fields = {
     nombre: req.body?.nombre,
     direccion: req.body?.direccion,
     telefono: req.body?.telefono,
     fondo_caja_default: req.body?.fondo_caja_default,
+    modo_caja: req.body?.modo_caja,
     activo: req.body?.activo,
   };
   const sets = [];
@@ -60,7 +70,7 @@ router.patch('/:id', requireRole('admin'), async (req, res) => {
   values.push(req.params.id);
   const { rows } = await pool.query(
     `UPDATE sucursales SET ${sets.join(', ')} WHERE id = $${i}
-     RETURNING id, nombre, direccion, telefono, fondo_caja_default, activo`,
+     RETURNING id, nombre, direccion, telefono, fondo_caja_default, modo_caja, activo`,
     values
   );
   if (!rows[0]) return res.status(404).json({ error: 'Sucursal no encontrada.' });
