@@ -56,56 +56,6 @@ router.get('/:id', async (req, res) => {
   res.json({ ...credito, abonos: abonos.rows });
 });
 
-// Autorizacion de credito independiente de una venta puntual (ej. abrir una
-// cuenta/tab para un cliente). El flujo mas comun es vender "a credito"
-// desde el Punto de Venta (ver POST /ventas), que crea este mismo tipo de
-// registro automaticamente con venta_id -- mismas reglas de politica de
-// cliente (permite_credito/limite_credito) aplicadas ahi tambien.
-router.post('/', requireRole('admin'), async (req, res) => {
-  const { cliente_id, monto_total, limite_aprobado, condiciones } = req.body ?? {};
-  if (!cliente_id) return res.status(400).json({ error: 'cliente_id es requerido.' });
-  if (!(Number(monto_total) > 0)) return res.status(400).json({ error: 'monto_total debe ser mayor a 0.' });
-  if (limite_aprobado !== undefined && limite_aprobado !== null && Number(monto_total) > Number(limite_aprobado)) {
-    return res.status(400).json({ error: 'El monto no puede superar el límite aprobado.' });
-  }
-
-  const clienteResult = await pool.query(
-    `SELECT permite_credito, limite_credito, plazo_dias_credito FROM clientes WHERE id = $1`,
-    [cliente_id]
-  );
-  const cliente = clienteResult.rows[0];
-  if (!cliente) return res.status(404).json({ error: 'Cliente no encontrado.' });
-  if (!cliente.permite_credito) return res.status(403).json({ error: 'Este cliente no está autorizado para comprar a crédito.' });
-
-  if (cliente.limite_credito != null) {
-    const expuesto = await pool.query(
-      `SELECT COALESCE(sum(saldo_pendiente), 0) AS total FROM creditos WHERE cliente_id = $1 AND estado IN ('activo', 'vencido')`,
-      [cliente_id]
-    );
-    const nuevoTotal = Number(expuesto.rows[0].total) + Number(monto_total);
-    if (nuevoTotal > Number(cliente.limite_credito)) {
-      return res.status(400).json({
-        error: `Este crédito supera el límite del cliente (debe $${Number(expuesto.rows[0].total).toFixed(2)} de $${Number(cliente.limite_credito).toFixed(2)}).`,
-      });
-    }
-  }
-
-  let fechaVencimiento = null;
-  if (cliente.plazo_dias_credito) {
-    const fecha = new Date();
-    fecha.setDate(fecha.getDate() + Number(cliente.plazo_dias_credito));
-    fechaVencimiento = fecha.toISOString().slice(0, 10);
-  }
-
-  const { rows } = await pool.query(
-    `INSERT INTO creditos (cliente_id, monto_total, saldo_pendiente, autorizado_por, limite_aprobado, condiciones, fecha_vencimiento)
-     VALUES ($1, $2, $2, $3, $4, $5, $6)
-     RETURNING id, cliente_id, monto_total, saldo_pendiente, limite_aprobado, condiciones, estado, fecha_vencimiento, autorizado_por, created_at`,
-    [cliente_id, Number(monto_total), req.usuario.sub, limite_aprobado ?? null, condiciones || null, fechaVencimiento]
-  );
-  res.status(201).json(rows[0]);
-});
-
 router.patch('/:id', requireRole('admin'), async (req, res) => {
   const { estado, condiciones, limite_aprobado, fecha_vencimiento } = req.body ?? {};
   if (estado !== undefined && !ESTADOS_VALIDOS.includes(estado)) return res.status(400).json({ error: 'Estado inválido.' });
