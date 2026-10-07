@@ -135,7 +135,9 @@ router.get('/export', requireRole('admin', 'vendedor', 'community_manager'), asy
   res.send(csv);
 });
 
-router.post('/', requireRole('admin', 'vendedor'), async (req, res) => {
+// Dar de alta productos y cambiar costos es de quien administra (dueño y supervisor): el costo de lo que
+// se compra entra por Compras (compras.routes.js) y el vendedor ya no lo captura ni lo edita.
+router.post('/', requireRole('admin'), async (req, res) => {
   const {
     sku, nombre, categoria_id, tipo, marca, modelo, ram, almacenamiento, procesador, color, usa_imei,
     precio_venta, costo, precio_mayoreo, precio_revendedor, imagen_url, proveedor_id, sucursal_id, stock_inicial, activo,
@@ -192,6 +194,10 @@ router.post('/', requireRole('admin', 'vendedor'), async (req, res) => {
 router.patch('/:id', requireRole('admin', 'vendedor'), async (req, res) => {
   if (req.body?.tipo !== undefined && !['nuevo', 'usado', 'accesorio', 'servicio'].includes(req.body.tipo)) {
     return res.status(400).json({ error: 'Tipo inválido.' });
+  }
+  // Se rechaza en vez de ignorarlo en silencio: un 200 que no cambia nada es el bug clasico de este PATCH.
+  if (req.body?.costo !== undefined && !esAdminODueno(req.usuario.rol)) {
+    return res.status(403).json({ error: 'Solo el administrador o el supervisor puede cambiar el costo.' });
   }
   const fields = {
     nombre: req.body?.nombre,
@@ -313,6 +319,9 @@ router.get('/:id/unidades', requireRole('admin', 'vendedor'), async (req, res) =
 router.post('/:id/unidades', requireRole('admin', 'vendedor'), async (req, res) => {
   const { sucursal_id, imei, condicion, costo_adquisicion } = req.body ?? {};
   if (!sucursal_id) return res.status(400).json({ error: 'sucursal_id es requerido.' });
+  if (costo_adquisicion && !esAdminODueno(req.usuario.rol)) {
+    return res.status(403).json({ error: 'Solo el administrador o el supervisor puede capturar el costo.' });
+  }
 
   const client = await pool.connect();
   try {
@@ -524,7 +533,7 @@ router.delete('/:id/imagenes/:imagenId', requireRole('admin', 'vendedor'), async
 // con problema (ej. IMEI duplicado) tumbe a todas las demas del lote.
 const UUID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
 
-router.post('/importar-lote', requireRole('admin', 'vendedor'), async (req, res) => {
+router.post('/importar-lote', requireRole('admin'), async (req, res) => {
   const { sucursal_id, tipo, items } = req.body ?? {};
   if (!sucursal_id) return res.status(400).json({ error: 'sucursal_id es requerido.' });
   if (!['nuevo', 'usado'].includes(tipo)) return res.status(400).json({ error: 'tipo debe ser "nuevo" o "usado".' });
