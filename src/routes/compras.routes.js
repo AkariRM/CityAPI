@@ -185,6 +185,8 @@ router.post('/previsualizar', async (req, res) => {
   }
 });
 
+// fecha_factura sale como texto 'YYYY-MM-DD': node-pg convierte un DATE a medianoche del servidor (UTC) y en Mexico eso se leeria
+// como el dia anterior.
 router.get('/', async (req, res) => {
   try {
     const { proveedor_id, estado, desde, hasta, q } = req.query;
@@ -192,7 +194,7 @@ router.get('/', async (req, res) => {
     const limite = Math.min(Math.max(parseInt(req.query.limite, 10) || 200, 1), 500);
     const patron = q ? `%${escaparLike(String(q).trim())}%` : null;
     const { rows } = await pool.query(
-      `SELECT c.id, c.folio, c.folio_proveedor, c.fecha_factura, c.created_at, c.estado, c.forma_pago, c.pagado_de_caja,
+      `SELECT c.id, c.folio, c.folio_proveedor, to_char(c.fecha_factura, 'YYYY-MM-DD') AS fecha_factura, c.created_at, c.estado, c.forma_pago, c.pagado_de_caja,
               c.subtotal, c.total, c.sucursal_id, s.nombre AS sucursal_nombre,
               c.proveedor_id, pv.nombre AS proveedor_nombre, u.nombre AS usuario_nombre,
               (SELECT count(*)::int FROM compra_items ci WHERE ci.compra_id = c.id) AS renglones
@@ -228,7 +230,7 @@ router.get('/:id', async (req, res) => {
   try {
     if (!UUID_RE.test(req.params.id)) throw falla(404, 'Compra no encontrada.');
     const compra = await pool.query(
-      `SELECT c.*, pv.nombre AS proveedor_nombre, s.nombre AS sucursal_nombre, u.nombre AS usuario_nombre, uc.nombre AS cancelada_por_nombre
+      `SELECT c.*, to_char(c.fecha_factura, 'YYYY-MM-DD') AS fecha_factura, pv.nombre AS proveedor_nombre, s.nombre AS sucursal_nombre, u.nombre AS usuario_nombre, uc.nombre AS cancelada_por_nombre
        FROM compras c
        JOIN proveedores pv ON pv.id = c.proveedor_id
        JOIN sucursales s ON s.id = c.sucursal_id
