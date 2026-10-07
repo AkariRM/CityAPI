@@ -403,7 +403,11 @@ CREATE TABLE venta_items (
   cantidad         integer NOT NULL CHECK (cantidad > 0),
   precio_unitario  numeric(12,2) NOT NULL,
   descuento        numeric(12,2) NOT NULL DEFAULT 0,
-  subtotal         numeric(12,2) NOT NULL
+  subtotal         numeric(12,2) NOT NULL,
+  -- Costo del producto AL MOMENTO de la venta: con costo promedio, productos.costo cambia en cada compra
+  -- y sin esto la utilidad de periodos pasados se reescribiria. NULL en las ventas anteriores a esta
+  -- columna (Finanzas cae al costo actual del producto, como siempre).
+  costo_unitario   numeric(12,2)
 );
 CREATE INDEX idx_venta_items_venta ON venta_items(venta_id);
 CREATE INDEX idx_venta_items_producto ON venta_items(producto_id);
@@ -849,7 +853,10 @@ CREATE TABLE gastos (
   id           uuid PRIMARY KEY DEFAULT gen_random_uuid(),
   sucursal_id  uuid REFERENCES sucursales(id),
   usuario_id   uuid REFERENCES usuarios(id),
-  tipo         text NOT NULL DEFAULT 'gasto' CHECK (tipo IN ('gasto', 'retiro')),
+  -- 'gasto' y 'retiro' los captura el personal (retiro = resguardo de efectivo, no cuenta como gasto);
+  -- 'compra' lo genera el sistema al pagar una compra de inventario con efectivo de la caja: resta del
+  -- efectivo esperado en el corte pero NO cuenta como gasto en Finanzas (su costo entra al vender).
+  tipo         text NOT NULL DEFAULT 'gasto' CHECK (tipo IN ('gasto', 'retiro', 'compra')),
   categoria    text NOT NULL,
   monto        numeric(12,2) NOT NULL,
   descripcion  text,
@@ -858,6 +865,92 @@ CREATE TABLE gastos (
 );
 CREATE INDEX idx_gastos_sucursal ON gastos(sucursal_id);
 CREATE INDEX idx_gastos_fecha ON gastos(fecha);
+
+-- ============================================================================
+-- COMPRAS DE INVENTARIO: una compra = una factura o ticket de un proveedor con varios renglones.
+-- Al registrarla suma stock a la sucursal (kardex 'entrada'), recalcula el costo promedio de cada
+-- producto (productos.costo) y, segun el modo elegido, sus precios de venta. Si se pago con efectivo
+-- de la caja genera una salida tipo 'compra' en gastos (ver arriba). Ver compras.routes.js.
+-- ============================================================================
+CREATE SEQUENCE compras_folio_seq;
+CREATE TABLE compras (
+  id                  uuid PRIMARY KEY DEFAULT gen_random_uuid(),
+  folio               text NOT NULL UNIQUE DEFAULT ('C-' || lpad(nextval('compras_folio_seq')::text, 6, '0')),
+  proveedor_id        uuid NOT NULL REFERENCES proveedores(id),
+  sucursal_id         uuid NOT NULL REFERENCES sucursales(id),
+  -- Folio de la factura/ticket del proveedor (el interno es "folio"). Dos compras registradas del mismo
+  -- proveedor no pueden repetirlo (indice unico de abajo); al cancelar una se libera.
+  folio_proveedor     text,
+  fecha_factura       date NOT NULL DEFAULT current_date,
+  -- 0.16 si los costos capturados ya traen IVA (el promedio se calcula sin IVA); 0 si no.
+  iva_tasa            numeric(4,3) NOT NULL DEFAULT 0 CHECK (iva_tasa >= 0 AND iva_tasa <= 1),
+  forma_pago          text NOT NULL CHECK (forma_pago IN ('efectivo', 'tarjeta', 'transferencia', 'cheque')),
+  -- Solo con efectivo: true = salio de la caja (genera la salida 'compra' del corte), false = el
+  -- efectivo salio de otro lado (ej. el dueño pago de su bolsa) y no toca el corte.
+  pagado_de_caja      boolean NOT NULL DEFAULT false,
+  subtotal            numeric(12,2) NOT NULL DEFAULT 0,
+  total               numeric(12,2) NOT NULL CHECK (total >= 0),
+  precios_modo        text NOT NULL CHECK (precios_modo IN ('margen', 'mantener')),
+  redondeo_multiplo   numeric(8,2) NOT NULL DEFAULT 0 CHECK (redondeo_multiplo >= 0),
+  redondeo_direccion  text NOT NULL DEFAULT 'arriba' CHECK (redondeo_direccion IN ('arriba', 'abajo', 'cercano')),
+  comentario          text,
+  estado              text NOT NULL DEFAULT 'registrada' CHECK (estado IN ('registrada', 'cancelada')),
+  gasto_id            uuid REFERENCES gastos(id) ON DELETE SET NULL,
+  usuario_id          uuid NOT NULL REFERENCES usuarios(id),
+  cancelada_at        timestamptz,
+  cancelada_por       uuid REFERENCES usuarios(id),
+  motivo_cancelacion  text,
+  created_at          timestamptz NOT NULL DEFAULT now()
+);
+CREATE INDEX idx_compras_sucursal ON compras(sucursal_id, created_at DESC);
+CREATE INDEX idx_compras_proveedor ON compras(proveedor_id);
+CREATE UNIQUE INDEX idx_compras_proveedor_folio ON compras(proveedor_id, lower(folio_proveedor))
+  WHERE folio_proveedor IS NOT NULL AND estado = 'registrada';
+
+CREATE TABLE compra_items (
+  id                 uuid PRIMARY KEY DEFAULT gen_random_uuid(),
+  compra_id          uuid NOT NULL REFERENCES compras(id) ON DELETE CASCADE,
+  producto_id        uuid NOT NULL REFERENCES productos(id),
+  -- Se compra en "unidades de compra" (cajas, paquetes o piezas): piezas = cantidad x piezas_por_unidad
+  -- es lo que entra a stock; costo_unitario es por unidad de compra, tal como viene en la factura.
+  cantidad           integer NOT NULL CHECK (cantidad > 0),
+  piezas_por_unidad  integer NOT NULL DEFAULT 1 CHECK (piezas_por_unidad >= 1),
+  piezas             integer NOT NULL CHECK (piezas > 0),
+  costo_unitario     numeric(12,4) NOT NULL CHECK (costo_unitario >= 0),
+  descuento_pct      numeric(5,2) NOT NULL DEFAULT 0 CHECK (descuento_pct >= 0 AND descuento_pct <= 100),
+  descuento_monto    numeric(12,2) NOT NULL DEFAULT 0 CHECK (descuento_monto >= 0),
+  importe            numeric(12,2) NOT NULL CHECK (importe >= 0),
+  clave_proveedor    text,
+  -- Costo por pieza SIN IVA y con descuento: el que entra al promedio.
+  costo_pieza        numeric(12,4) NOT NULL,
+  -- Foto de lo que habia antes y lo que quedo, para mostrarlo y para poder cancelar la compra:
+  -- stock_antes es el stock de TODAS las sucursales (el costo es del producto, no de la sucursal).
+  stock_antes        integer NOT NULL,
+  costo_antes        numeric(12,2) NOT NULL,
+  costo_despues      numeric(12,2) NOT NULL,
+  precio_antes       numeric(12,2),
+  precio_despues     numeric(12,2),
+  mayoreo_antes      numeric(12,2),
+  mayoreo_despues    numeric(12,2),
+  revendedor_antes   numeric(12,2),
+  revendedor_despues numeric(12,2),
+  UNIQUE (compra_id, producto_id)
+);
+CREATE INDEX idx_compra_items_producto ON compra_items(producto_id);
+
+-- Unidades IMEI dadas de alta desde una compra (para poder retirarlas si la compra se cancela).
+ALTER TABLE unidades_imei ADD COLUMN compra_item_id uuid REFERENCES compra_items(id) ON DELETE SET NULL;
+
+-- Clave que usa un proveedor para un producto (el codigo de SU factura): sirve para reconocer el
+-- renglon en la siguiente compra. Una clave identifica a un solo producto por proveedor.
+CREATE TABLE producto_proveedor_claves (
+  proveedor_id  uuid NOT NULL REFERENCES proveedores(id) ON DELETE CASCADE,
+  producto_id   uuid NOT NULL REFERENCES productos(id) ON DELETE CASCADE,
+  clave         text NOT NULL,
+  updated_at    timestamptz NOT NULL DEFAULT now(),
+  PRIMARY KEY (proveedor_id, producto_id)
+);
+CREATE UNIQUE INDEX idx_producto_proveedor_claves_clave ON producto_proveedor_claves(proveedor_id, lower(clave));
 
 -- ============================================================================
 -- NOTIFICACIONES INTERNAS (campana en el topbar)
@@ -948,6 +1041,13 @@ CREATE TABLE configuracion_ticket (
   -- Por cada punto de estetica (1-10, ver ChecklistRevisionEquipo.jsx) por debajo de 8, se resta
   -- este porcentaje del valor. 0.03 = 3% por punto.
   cambio_equipo_estetica_pct     numeric(5,4) NOT NULL DEFAULT 0.03 CHECK (cambio_equipo_estetica_pct BETWEEN 0 AND 1),
+  -- Compras de inventario (ver compras.routes.js): que hacer con los precios de venta al registrar una
+  -- compra -- 'margen' = recalcularlos para conservar el margen de cada precio sobre el nuevo costo
+  -- promedio, 'mantener' = dejarlos como estan -- y como redondear los precios recalculados (multiplo
+  -- 0 = sin redondeo; direccion arriba/abajo/cercano). En cada compra se puede cambiar al cerrarla.
+  compras_precios_modo           text NOT NULL DEFAULT 'margen' CHECK (compras_precios_modo IN ('margen', 'mantener')),
+  compras_redondeo_multiplo      numeric(8,2) NOT NULL DEFAULT 5 CHECK (compras_redondeo_multiplo >= 0),
+  compras_redondeo_direccion     text NOT NULL DEFAULT 'arriba' CHECK (compras_redondeo_direccion IN ('arriba', 'abajo', 'cercano')),
   updated_at                  timestamptz NOT NULL DEFAULT now()
 );
 

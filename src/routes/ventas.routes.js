@@ -297,8 +297,10 @@ router.post('/', async (req, res) => {
       const itemDescuento = Number(item.descuento) || 0;
       const itemSubtotal = item.cantidad * precioUnitario - itemDescuento;
       await client.query(
-        `INSERT INTO venta_items (venta_id, producto_id, unidad_imei_id, cantidad, precio_unitario, descuento, subtotal)
-         VALUES ($1, $2, $3, $4, $5, $6, $7)`,
+        // costo_unitario: el costo del producto en este momento (con costo promedio cambia en cada compra y
+        // la utilidad de periodos pasados no debe reescribirse).
+        `INSERT INTO venta_items (venta_id, producto_id, unidad_imei_id, cantidad, precio_unitario, descuento, subtotal, costo_unitario)
+         VALUES ($1, $2, $3, $4, $5, $6, $7, (SELECT costo FROM productos WHERE id = $2))`,
         [venta.id, item.producto_id, item.unidad_imei_id || null, item.cantidad, precioUnitario, itemDescuento, itemSubtotal]
       );
 

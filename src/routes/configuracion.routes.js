@@ -58,7 +58,20 @@ router.patch('/', requireRole('admin'), async (req, res) => {
     cambio_equipo_deduccion_baja: req.body?.cambio_equipo_deduccion_baja,
     cambio_equipo_factor_bloqueado: req.body?.cambio_equipo_factor_bloqueado,
     cambio_equipo_estetica_pct: req.body?.cambio_equipo_estetica_pct,
+    compras_precios_modo: req.body?.compras_precios_modo,
+    compras_redondeo_multiplo: req.body?.compras_redondeo_multiplo,
+    compras_redondeo_direccion: req.body?.compras_redondeo_direccion,
   };
+  if (fields.compras_precios_modo !== undefined && !['margen', 'mantener'].includes(fields.compras_precios_modo)) {
+    return res.status(400).json({ error: "El modo de precios de las compras debe ser 'margen' o 'mantener'." });
+  }
+  if (fields.compras_redondeo_direccion !== undefined && !['arriba', 'abajo', 'cercano'].includes(fields.compras_redondeo_direccion)) {
+    return res.status(400).json({ error: "La dirección del redondeo debe ser 'arriba', 'abajo' o 'cercano'." });
+  }
+  if (fields.compras_redondeo_multiplo !== undefined
+    && !(typeof fields.compras_redondeo_multiplo === 'number' && Number.isFinite(fields.compras_redondeo_multiplo) && fields.compras_redondeo_multiplo >= 0 && fields.compras_redondeo_multiplo <= 100000)) {
+    return res.status(400).json({ error: 'El redondeo debe ser un número entre 0 y 100000 (0 = sin redondeo).' });
+  }
   if (fields.calcomania_equipo_codigo !== undefined && !CODIGOS_CALCOMANIA.includes(fields.calcomania_equipo_codigo)) {
     return res.status(400).json({ error: "El código de la calcomanía debe ser 'barras' o 'qr'." });
   }

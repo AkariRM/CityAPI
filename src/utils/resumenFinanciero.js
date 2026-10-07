@@ -40,8 +40,10 @@ async function calcularResumenFinanciero(desde, hasta, sucursalId = null) {
     [desdeUTC, hastaUTC, sucursal]
   );
 
+  // Costo del producto al momento de la venta (venta_items.costo_unitario); las ventas anteriores a esa
+  // columna no lo tienen y caen al costo actual del producto, como siempre.
   const costoVentas = await pool.query(
-    `SELECT COALESCE(sum(vi.cantidad * p.costo), 0) AS valor
+    `SELECT COALESCE(sum(vi.cantidad * COALESCE(vi.costo_unitario, p.costo)), 0) AS valor
      FROM venta_items vi
      JOIN ventas v ON v.id = vi.venta_id
      JOIN productos p ON p.id = vi.producto_id
