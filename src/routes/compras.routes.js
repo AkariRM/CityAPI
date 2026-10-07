@@ -14,7 +14,8 @@ const UUID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/
 const FORMAS_PAGO = ['efectivo', 'tarjeta', 'transferencia', 'cheque'];
 const PRECIOS_MODOS = ['margen', 'mantener'];
 const DIRECCIONES = ['arriba', 'abajo', 'cercano'];
-const TIPOS_COMPRABLES = ['nuevo', 'usado', 'accesorio'];
+// Solo accesorios: los equipos (nuevos y usados) se dan de alta en Equipos nuevos/usados o entran por Cambios.
+const TIPO_COMPRABLE = 'accesorio';
 const MAX_RENGLONES = 200;
 
 function falla(statusCode, mensaje, extra = {}) {
@@ -64,7 +65,6 @@ function validarRenglones(items) {
     const importe = calcularImporte({ cantidad: it.cantidad, costo_unitario: it.costo_unitario, descuento_pct: descuentoPct, descuento_monto: descuentoMonto });
     if (importe < 0) throw falla(400, `Renglón ${n}: el descuento es mayor que el importe.`);
     const clave = typeof it.clave_proveedor === 'string' ? it.clave_proveedor.trim().slice(0, 60) : '';
-    const imeis = Array.isArray(it.imeis) ? it.imeis.map((x) => String(x ?? '').trim()).filter(Boolean) : [];
     return {
       producto_id: it.producto_id,
       cantidad: it.cantidad,
@@ -74,7 +74,6 @@ function validarRenglones(items) {
       descuento_monto: descuentoMonto,
       clave_proveedor: clave || null,
       actualizar_precios: it.actualizar_precios !== false,
-      imeis,
     };
   });
 }
@@ -94,7 +93,7 @@ function normalizarOpciones(body, config) {
 async function cargarProductos(queryable, ids, { bloquear = false } = {}) {
   if (bloquear) await queryable.query(`SELECT id FROM productos WHERE id = ANY($1::uuid[]) ORDER BY id FOR UPDATE`, [ids]);
   const { rows } = await queryable.query(
-    `SELECT p.id, p.nombre, p.sku, p.tipo, p.usa_imei, p.activo, p.costo, p.precio_venta, p.precio_mayoreo, p.precio_revendedor,
+    `SELECT p.id, p.nombre, p.sku, p.tipo, p.activo, p.costo, p.precio_venta, p.precio_mayoreo, p.precio_revendedor,
             COALESCE((SELECT sum(stock_cantidad) FROM inventario WHERE producto_id = p.id), 0)::int AS stock_total
      FROM productos p WHERE p.id = ANY($1::uuid[])`,
     [ids]
@@ -107,7 +106,8 @@ function armarPlan(renglones, productos, opciones) {
     const producto = productos.get(item.producto_id);
     const n = i + 1;
     if (!producto) throw falla(400, `Renglón ${n}: el producto no existe.`);
-    if (!TIPOS_COMPRABLES.includes(producto.tipo)) throw falla(400, `Renglón ${n}: "${producto.nombre}" es un servicio y no maneja inventario.`);
+    if (producto.tipo === 'servicio') throw falla(400, `Renglón ${n}: "${producto.nombre}" es un servicio y no maneja inventario.`);
+    if (producto.tipo !== TIPO_COMPRABLE) throw falla(400, `Renglón ${n}: "${producto.nombre}" es un equipo. Los equipos se dan de alta en Equipos nuevos/usados o entran por Cambios, no por Compras.`);
     if (!producto.activo) throw falla(400, `Renglón ${n}: "${producto.nombre}" está dado de baja.`);
     return { item, producto, plan: planificarRenglon({ item, producto, ...opciones }) };
   });
@@ -142,7 +142,7 @@ function escaparLike(texto) {
   return texto.replace(/[\\%_]/g, '\\$&');
 }
 
-// Buscar productos para agregar a la compra: por nombre, SKU o la clave que le da ESTE proveedor (la que
+// Buscar accesorios para agregar a la compra: por nombre, SKU o la clave que le da ESTE proveedor (la que
 // coincide exacta sale primero). Trae costo promedio, precios y stock para mostrarlos al capturar.
 router.get('/productos', async (req, res) => {
   try {
@@ -151,7 +151,7 @@ router.get('/productos', async (req, res) => {
     const sucursalId = UUID_RE.test(req.query.sucursal_id ?? '') ? req.query.sucursal_id : null;
     const patron = `%${escaparLike(q)}%`;
     const { rows } = await pool.query(
-      `SELECT p.id, p.nombre, p.sku, p.tipo, p.usa_imei, p.color, p.almacenamiento, p.costo,
+      `SELECT p.id, p.nombre, p.sku, p.tipo, p.color, p.almacenamiento, p.costo,
               p.precio_venta, p.precio_mayoreo, p.precio_revendedor,
               COALESCE((SELECT sum(stock_cantidad) FROM inventario WHERE producto_id = p.id), 0)::int AS stock_total,
               COALESCE((SELECT stock_cantidad FROM inventario WHERE producto_id = p.id AND sucursal_id = $3::uuid), 0)::int AS stock_sucursal,
@@ -159,7 +159,7 @@ router.get('/productos', async (req, res) => {
               (k.clave IS NOT NULL AND $1 <> '' AND lower(k.clave) = lower($1)) AS coincide_clave
        FROM productos p
        LEFT JOIN producto_proveedor_claves k ON k.producto_id = p.id AND k.proveedor_id = $2::uuid
-       WHERE p.activo AND p.tipo IN ('nuevo', 'usado', 'accesorio')
+       WHERE p.activo AND p.tipo = 'accesorio'
          AND ($1 = '' OR p.nombre ILIKE $4 OR p.sku ILIKE $4 OR k.clave ILIKE $4)
        ORDER BY coincide_clave DESC, p.nombre
        LIMIT 25`,
@@ -284,20 +284,6 @@ router.post('/', async (req, res) => {
     const productos = await cargarProductos(client, renglones.map((r) => r.producto_id), { bloquear: true });
     const plan = armarPlan(renglones, productos, opciones);
 
-    // IMEIs: solo en productos que los usan, sin pasarse de las piezas y sin repetirse (ni aqui ni en la base).
-    const todosImeis = [];
-    plan.forEach(({ item, producto, plan: p }, i) => {
-      if (item.imeis.length === 0) return;
-      if (!producto.usa_imei) throw falla(400, `Renglón ${i + 1}: "${producto.nombre}" no maneja IMEI.`);
-      if (item.imeis.length > p.piezas) throw falla(400, `Renglón ${i + 1}: hay más IMEI (${item.imeis.length}) que piezas (${p.piezas}).`);
-      todosImeis.push(...item.imeis);
-    });
-    if (new Set(todosImeis.map((x) => x.toLowerCase())).size !== todosImeis.length) throw falla(400, 'Hay IMEI repetidos en la compra.');
-    if (todosImeis.length > 0) {
-      const existentes = await client.query(`SELECT imei FROM unidades_imei WHERE imei = ANY($1::text[])`, [todosImeis]);
-      if (existentes.rows[0]) throw falla(409, `El IMEI ${existentes.rows[0].imei} ya está registrado.`);
-    }
-
     const totales = totalesCompra(plan.map((p) => p.plan.importe), opciones.iva_tasa);
 
     const compraRow = await client.query(
@@ -314,12 +300,11 @@ router.post('/', async (req, res) => {
     const motivoKardex = `Compra ${compra.folio} · ${proveedor.rows[0].nombre}${folioProveedor ? ` · factura ${folioProveedor}` : ''}`;
 
     for (const { item, producto, plan: p } of plan) {
-      const itemRow = await client.query(
+      await client.query(
         `INSERT INTO compra_items (compra_id, producto_id, cantidad, piezas_por_unidad, piezas, costo_unitario, descuento_pct, descuento_monto, importe,
                                    clave_proveedor, costo_pieza, stock_antes, costo_antes, costo_despues,
                                    precio_antes, precio_despues, mayoreo_antes, mayoreo_despues, revendedor_antes, revendedor_despues)
-         VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $17, $18, $19, $20)
-         RETURNING id`,
+         VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $17, $18, $19, $20)`,
         [
           compra.id, producto.id, item.cantidad, p.piezas_por_unidad, p.piezas, item.costo_unitario, item.descuento_pct, item.descuento_monto, p.importe,
           item.clave_proveedor, p.costo_pieza, p.stock_antes, p.costo_antes, p.costo_despues,
@@ -353,15 +338,6 @@ router.post('/', async (req, res) => {
           [body.proveedor_id, producto.id, item.clave_proveedor]
         );
       }
-
-      // Las unidades con IMEI se dan de alta aqui directo: el stock ya subio arriba (no pasar por
-      // POST /productos/:id/unidades, que ademas suma 1 por unidad).
-      for (const imei of item.imeis) {
-        await client.query(
-          `INSERT INTO unidades_imei (producto_id, sucursal_id, imei, costo_adquisicion, compra_item_id) VALUES ($1, $2, $3, $4, $5)`,
-          [producto.id, sucursalId, imei, Math.round(p.costo_pieza * 100) / 100, itemRow.rows[0].id]
-        );
-      }
     }
 
     // Efectivo de la caja: salida tipo 'compra' (resta del efectivo del corte; no es gasto en Finanzas).
@@ -392,7 +368,6 @@ router.post('/', async (req, res) => {
       const texto = `${err.constraint ?? ''} ${err.message ?? ''}`;
       if (texto.includes('idx_compras_proveedor_folio')) return responderError(res, falla(409, 'Ya hay una compra registrada de este proveedor con ese folio.'));
       if (texto.includes('idx_producto_proveedor_claves_clave')) return responderError(res, falla(409, 'Esa clave ya está ligada a otro producto de este proveedor.'));
-      if (texto.includes('unidades_imei_imei_key')) return responderError(res, falla(409, 'Alguno de los IMEI ya está registrado.'));
     }
     responderError(res, err);
   } finally {
@@ -401,8 +376,8 @@ router.post('/', async (req, res) => {
 });
 
 // Cancelar una compra registrada. Solo si se puede deshacer exacto: sin compras posteriores de esos productos,
-// con stock suficiente para retirar lo que entro, con las unidades IMEI aun disponibles y, si salio efectivo de
-// la caja, sin que se haya hecho el corte de ese turno. Queda marcada 'cancelada' (no se borra).
+// con stock suficiente para retirar lo que entro y, si salio efectivo de la caja,
+// sin que se haya hecho el corte de ese turno. Queda marcada 'cancelada' (no se borra).
 router.post('/:id/cancelar', async (req, res) => {
   const client = await pool.connect();
   try {
@@ -441,13 +416,6 @@ router.post('/:id/cancelar', async (req, res) => {
       if (disponible < it.piezas) problemas.push(`de "${it.nombre}" solo quedan ${Math.max(disponible, 0)} piezas libres y la compra metió ${it.piezas}`);
     }
 
-    const unidades = await client.query(
-      `SELECT u.id, u.imei, u.estado FROM unidades_imei u WHERE u.compra_item_id = ANY($1::uuid[])`,
-      [items.map((i) => i.id)]
-    );
-    const noDisponibles = unidades.rows.filter((u) => u.estado !== 'disponible');
-    if (noDisponibles.length > 0) problemas.push(`${noDisponibles.length} unidad(es) con IMEI ya no están disponibles (vendidas, apartadas o en reparación)`);
-
     if (compra.gasto_id) {
       const gasto = (await client.query(`SELECT created_at, usuario_id FROM gastos WHERE id = $1`, [compra.gasto_id])).rows[0];
       if (gasto) {
@@ -479,7 +447,6 @@ router.post('/:id/cancelar', async (req, res) => {
         costosNoRevertidos.push(it.nombre);
       }
     }
-    if (unidades.rows.length > 0) await client.query(`DELETE FROM unidades_imei WHERE id = ANY($1::uuid[])`, [unidades.rows.map((u) => u.id)]);
     if (compra.gasto_id) await client.query(`DELETE FROM gastos WHERE id = $1`, [compra.gasto_id]);
 
     await client.query(
