@@ -571,6 +571,9 @@ CREATE TABLE reparaciones (
   -- Respuesta Si/No de "el equipo enciende" al recibirlo. Null en folios
   -- anteriores a este campo y en equipos propios. Solo visible en la app.
   equipo_enciende    boolean,
+  -- Estimado que da el mostrador al recibir el equipo, sujeto a diagnostico (opcional). No es la cotizacion
+  -- final (total) ni se cobra.
+  cotizacion_aproximada numeric(12,2) CHECK (cotizacion_aproximada >= 0),
   -- El cliente rechazo la cotizacion por WhatsApp (ver migracion_cotizacion_rechazada.sql):
   -- cuando y que monto. El folio sigue en esperando_autorizacion.
   cotizacion_rechazada_at    timestamptz,

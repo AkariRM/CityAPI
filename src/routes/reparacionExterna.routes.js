@@ -1,6 +1,7 @@
 const express = require('express');
 const { pool } = require('../db');
 const { verificarSecreto } = require('../middleware/webhookSecret');
+const { cancelarPorRechazo } = require('../utils/flujoReparacion');
 
 const router = express.Router();
 
@@ -149,9 +150,8 @@ router.get('/', verificarSecreto, async (req, res) => {
 //  - se puede apagar al instante: solo funciona con AGENTE_AUTORIZAR_ACTIVO=true.
 //
 // autoriza=true  -> el folio pasa a "reparacion" (en_reparacion) y queda fijo el monto.
-// autoriza=false -> el folio NO cambia de estado: queda una nota en el historial y
-//                   la marca cotizacion_rechazada; el personal decide si cancela o
-//                   renegocia (lo ve en el panel y en el detalle del folio).
+// autoriza=false -> el folio se CANCELA directo ("Cliente no autorizó"), sin renegociar, y las
+//                   piezas apartadas para cotizar regresan al inventario.
 // Es idempotente: repetir la misma llamada no duplica nada.
 router.post('/autorizar', verificarSecreto, async (req, res) => {
   if (process.env.AGENTE_AUTORIZAR_ACTIVO !== 'true') {
@@ -200,7 +200,6 @@ router.post('/autorizar', verificarSecreto, async (req, res) => {
     }
 
     const total = Number(r.total);
-    const rechazoVigente = r.cotizacion_rechazada_at != null && centavos(r.cotizacion_rechazada_monto) === centavos(total);
 
     if (autoriza) {
       if (r.estado === ESTADO_PARA_COTIZAR) {
@@ -225,14 +224,14 @@ router.post('/autorizar', verificarSecreto, async (req, res) => {
       }
     } else if (r.estado === ESTADO_PARA_COTIZAR) {
       if (!(total > 0)) aviso = 'Este folio todavía no tiene una cotización.';
-      else if (!rechazoVigente) {
-        await client.query(`UPDATE reparaciones SET cotizacion_rechazada_at = now(), cotizacion_rechazada_monto = $2 WHERE id = $1`, [r.id, total]);
-        await client.query(
-          `INSERT INTO reparacion_historial (reparacion_id, estado, nota, usuario_id) VALUES ($1, 'esperando_autorizacion', $2, NULL)`,
-          [r.id, `El cliente indicó por WhatsApp que NO autoriza la cotización (${dinero(total)}). Requiere seguimiento del personal.`]
-        );
+      else {
+        await cancelarPorRechazo(client, { id: r.id, folio: folio.trim() }, {
+          usuarioId: null,
+          nota: `Cliente no autorizó la cotización (${dinero(total)}): lo indicó por WhatsApp.`,
+        });
       }
-      // Si ya estaba rechazada con este mismo monto: reintento, no se duplica la nota.
+    } else if (r.estado === 'cancelado') {
+      // Ya estaba cancelado (reintento de la misma respuesta): no se escribe nada.
     } else if (r.estado === 'reparacion') {
       aviso = 'Este folio ya está autorizado. Cualquier cancelación la atiende un asesor.';
     } else {

@@ -5,6 +5,8 @@ const { alcanceReparaciones, enAlcance, sqlAlcance, esPersonalTaller } = require
 const { inicioDiaUTC, finDiaUTCExclusivo } = require('../utils/fechas');
 const { obtenerConfiguracionTicket } = require('../utils/configuracionTicket');
 const { registrarMovimientoRefaccion } = require('../utils/movimientosRefacciones');
+const { avisarCliente, mensajeCotizacion, mensajeReparado, mensajeListoEnTienda } = require('../utils/notificarReparacion');
+const { ESTADOS_ANTES_DE_REPARAR, devolverPiezas, cancelarPorRechazo, dinero } = require('../utils/flujoReparacion');
 
 const router = express.Router();
 
@@ -31,8 +33,10 @@ router.param('id', async (req, res, next, id) => {
 });
 
 const UBICACIONES_VALIDAS = ['sucursal', 'en_transito_taller', 'taller', 'en_transito_sucursal'];
-// Pasos que marca el taller (los demas los cambia la sucursal: recibido, entregado, cancelado).
-const ESTADOS_DEL_TALLER = ['diagnostico', 'esperando_autorizacion', 'reparacion', 'listo'];
+// Por PATCH el taller solo pasa a diagnostico. La cotizacion, la reparacion terminada y el envio a la tienda tienen su
+// propio paso (enviar-cotizacion, terminar-reparacion, enviar-a-sucursal) para que el aviso al cliente y el historial
+// salgan siempre; la respuesta del cliente la registra la sucursal (respuesta-cotizacion). El dueño puede todo.
+const PASOS_DEL_TALLER_POR_PATCH = ['diagnostico'];
 const MENSAJE_FUERA_DEL_TALLER = {
   sucursal: 'El equipo todavía está en la sucursal: espera a que lo envíen y recíbelo en el taller.',
   en_transito_taller: 'El equipo va en camino: recíbelo en el taller antes de trabajar en él.',
@@ -41,6 +45,16 @@ const MENSAJE_FUERA_DEL_TALLER = {
 const ESTADOS_VALIDOS = ['recibido', 'diagnostico', 'esperando_autorizacion', 'reparacion', 'listo', 'entregado', 'cancelado'];
 const PRIORIDADES_VALIDAS = ['baja', 'media', 'alta'];
 const METODOS_PAGO_VALIDOS = ['efectivo', 'tarjeta'];
+
+// Un equipo propio (compra_propia) que termina su revision reaparece en catalogo si el toggle esta encendido.
+async function reactivarCatalogoSiAplica(client, r, configTicket) {
+  if (r.origen_reparacion === 'compra_propia' && r.producto_id && configTicket.reactivacion_catalogo_automatica !== false) {
+    await client.query(`UPDATE productos SET activo = true WHERE id = $1`, [r.producto_id]);
+    if (r.unidad_imei_id) {
+      await client.query(`UPDATE unidades_imei SET estado = 'disponible', updated_at = now() WHERE id = $1`, [r.unidad_imei_id]);
+    }
+  }
+}
 
 // IMPORTANTE: esta ruta especifica va ANTES de "/:id" para que Express no la
 // confunda con una busqueda por id (que fallaria con "reporte" como uuid).
@@ -105,7 +119,7 @@ router.get('/', async (req, res) => {
     `SELECT r.id, r.folio, r.cliente_id, c.nombre AS cliente_nombre, r.sucursal_id,
             r.equipo_marca, r.equipo_modelo, r.imei_equipo, r.problema_reportado, r.diagnostico,
             r.estado, r.prioridad, r.tecnico_id, t.nombre AS tecnico_nombre,
-            r.costo_mano_obra, r.costo_refacciones, r.total, r.garantia_dias,
+            r.costo_mano_obra, r.costo_refacciones, r.total, r.garantia_dias, r.cotizacion_aproximada,
             r.origen_reparacion, r.producto_id, p.nombre AS producto_nombre, r.unidad_imei_id, r.created_at, r.updated_at,
             r.ubicacion, r.en_taller_desde, sc.nombre AS sucursal_nombre,
             (r.estado = 'esperando_autorizacion' AND r.cotizacion_rechazada_at IS NOT NULL AND r.cotizacion_rechazada_monto = r.total) AS cotizacion_rechazada
@@ -140,7 +154,7 @@ router.get('/:id', async (req, res) => {
             r.equipo_marca, r.equipo_modelo, r.imei_equipo, r.equipo_contrasena, r.equipo_enciende, r.problema_reportado, r.diagnostico,
             r.estado, r.prioridad, r.tecnico_id, t.nombre AS tecnico_nombre,
             r.costo_mano_obra, r.costo_refacciones, r.total, r.garantia_dias, r.monto_pagado,
-            r.fecha_estimada_entrega, r.nota_para_cliente, r.checklist_revision,
+            r.fecha_estimada_entrega, r.nota_para_cliente, r.checklist_revision, r.cotizacion_aproximada,
             r.cotizacion_rechazada_at, r.cotizacion_rechazada_monto,
             (r.estado = 'esperando_autorizacion' AND r.cotizacion_rechazada_at IS NOT NULL AND r.cotizacion_rechazada_monto = r.total) AS cotizacion_rechazada,
             r.origen_reparacion, r.producto_id, prod.nombre AS producto_nombre, prod.activo AS producto_activo, r.unidad_imei_id, r.created_at, r.updated_at,
@@ -236,7 +250,7 @@ router.get('/:id', async (req, res) => {
 router.post('/', requireRole('admin', 'vendedor'), async (req, res) => {
   const {
     cliente_id, sucursal_id, telefono, telefono_adicional, equipo_marca, equipo_modelo, imei_equipo, equipo_contrasena, problema_reportado, prioridad,
-    equipo_enciende, origen_reparacion, producto_id, unidad_imei_id, anticipo, anticipo_metodo,
+    equipo_enciende, origen_reparacion, producto_id, unidad_imei_id, anticipo, anticipo_metodo, cotizacion_aproximada,
   } = req.body ?? {};
 
   const esCompraPropia = origen_reparacion === 'compra_propia';
@@ -252,6 +266,14 @@ router.post('/', requireRole('admin', 'vendedor'), async (req, res) => {
     if (!telefono?.trim()) return res.status(400).json({ error: 'El teléfono de contacto es requerido.' });
   }
   if (!problema_reportado?.trim()) return res.status(400).json({ error: 'Describe el problema reportado.' });
+  // Cotizacion aproximada (opcional): el estimado que da el mostrador, sujeto a diagnostico. No es la cotizacion final.
+  let cotizacionAproximada = null;
+  if (cotizacion_aproximada !== undefined && cotizacion_aproximada !== null && cotizacion_aproximada !== '') {
+    cotizacionAproximada = Number(cotizacion_aproximada);
+    if (!(Number.isFinite(cotizacionAproximada) && cotizacionAproximada >= 0)) {
+      return res.status(400).json({ error: 'La cotización aproximada debe ser un número mayor o igual a 0.' });
+    }
+  }
   // Anticipo opcional al recibir el equipo: dinero que el cliente deja de entrada, antes de que se
   // sepa el costo final — se descuenta del total como cualquier otro abono (ver POST /:id/abonos).
   const montoAnticipo = anticipo !== undefined && anticipo !== null && anticipo !== '' ? Number(anticipo) : 0;
@@ -288,14 +310,15 @@ router.post('/', requireRole('admin', 'vendedor'), async (req, res) => {
     }
 
     const reparacion = await client.query(
-      `INSERT INTO reparaciones (cliente_id, sucursal_id, equipo_marca, equipo_modelo, imei_equipo, equipo_contrasena, problema_reportado, prioridad, origen_reparacion, producto_id, unidad_imei_id, equipo_enciende)
-       VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12)
+      `INSERT INTO reparaciones (cliente_id, sucursal_id, equipo_marca, equipo_modelo, imei_equipo, equipo_contrasena, problema_reportado, prioridad, origen_reparacion, producto_id, unidad_imei_id, equipo_enciende, cotizacion_aproximada)
+       VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13)
        RETURNING id, folio, estado, created_at`,
       [
         esCompraPropia ? null : cliente_id, sucursal_id, equipo_marca || null, equipo_modelo || null, imei_equipo || null,
         equipo_contrasena || null, problema_reportado.trim(), prioridadFinal,
         esCompraPropia ? 'compra_propia' : 'cliente', producto_id || null, unidad_imei_id || null,
         typeof equipo_enciende === 'boolean' ? equipo_enciende : null,
+        esCompraPropia ? null : cotizacionAproximada,
       ]
     );
 
@@ -393,8 +416,8 @@ router.patch('/:id', async (req, res) => {
       if ((cambiaEstado || cambiaDiagnostico || cambiaCosto || cambiaGarantia) && actual.ubicacion !== 'taller') {
         return res.status(409).json({ error: MENSAJE_FUERA_DEL_TALLER[actual.ubicacion] });
       }
-      if (cambiaEstado && !ESTADOS_DEL_TALLER.includes(b.estado)) {
-        return res.status(403).json({ error: 'El taller solo marca diagnóstico, autorizado, en reparación y listo.' });
+      if (cambiaEstado && !PASOS_DEL_TALLER_POR_PATCH.includes(b.estado)) {
+        return res.status(403).json({ error: 'Ese paso tiene su propio botón: mandar la cotización o marcar la reparación terminada.' });
       }
     } else {
       // La sucursal entrega y cancela; el diagnostico y los pasos del taller los captura el taller.
@@ -484,12 +507,11 @@ router.patch('/:id', async (req, res) => {
     // catalogo/venta. Si esta apagado, se queda inactivo hasta que alguien
     // presione "Publicar en catalogo" a mano (ver UnidadesImeiModal/
     // ReparacionDetalleModal, que reusan PATCH /productos/:id { activo }).
-    if (nuevoEstado === 'listo' && actual.estado !== 'listo' && actual.origen_reparacion === 'compra_propia'
-      && actual.producto_id && configTicket.reactivacion_catalogo_automatica !== false) {
-      await client.query(`UPDATE productos SET activo = true WHERE id = $1`, [actual.producto_id]);
-      if (actual.unidad_imei_id) {
-        await client.query(`UPDATE unidades_imei SET estado = 'disponible', updated_at = now() WHERE id = $1`, [actual.unidad_imei_id]);
-      }
+    if (nuevoEstado === 'listo' && actual.estado !== 'listo') await reactivarCatalogoSiAplica(client, actual, configTicket);
+
+    // Cancelar antes de que empiece la reparacion regresa al inventario las piezas que se apartaron para cotizar.
+    if (nuevoEstado === 'cancelado' && actual.estado !== 'cancelado' && ESTADOS_ANTES_DE_REPARAR.includes(actual.estado)) {
+      await devolverPiezas(client, { reparacionId: actual.id, folio: actual.folio, usuarioId: req.usuario.sub });
     }
 
     await client.query('COMMIT');
@@ -503,6 +525,139 @@ router.patch('/:id', async (req, res) => {
   }
 });
 
+// ---------------------------------------------------------------------------------------------------------------
+// Fases del folio. Cada fase tiene su propio paso (la app ya no deja elegir el estado a mano, salvo al dueño):
+// asi el historial y el aviso al cliente salen siempre. Los avisos van por n8n (utils/notificarReparacion.js) y si
+// fallan el folio avanza de todos modos: la respuesta trae `aviso` para que quien hizo el cambio lo sepa.
+// ---------------------------------------------------------------------------------------------------------------
+
+function falla(statusCode, mensaje) {
+  return Object.assign(new Error(mensaje), { statusCode });
+}
+
+function responderFallo(res, err) {
+  res.status(err.statusCode ?? 500).json({ error: err.statusCode ? err.message : 'Error interno del servidor.' });
+  if (!err.statusCode) console.error(err);
+}
+
+// 1. El taller manda la cotizacion al cliente: el folio pasa a "esperando autorizacion" y se le avisa. Si ya estaba
+// esperando (por ejemplo el aviso fallo), se vuelve a mandar el aviso sin cambiar nada mas.
+router.post('/:id/enviar-cotizacion', requireRole('dueño', 'supervisor_taller', 'tecnico'), async (req, res) => {
+  const client = await pool.connect();
+  try {
+    await client.query('BEGIN');
+    const { rows } = await client.query(`SELECT id, folio, estado, ubicacion, total, cliente_id FROM reparaciones WHERE id = $1 FOR UPDATE`, [req.params.id]);
+    const r = rows[0];
+    if (!r) throw falla(404, 'Reparación no encontrada.');
+    if (!r.cliente_id) throw falla(409, 'Un equipo propio no lleva cotización para un cliente.');
+    if (req.usuario.rol !== 'dueño' && r.ubicacion !== 'taller') throw falla(409, 'El equipo no está en el taller: recíbelo antes de cotizar.');
+    if (!['diagnostico', 'esperando_autorizacion'].includes(r.estado)) throw falla(409, 'La cotización se manda desde el diagnóstico.');
+    if (!(Number(r.total) > 0)) throw falla(409, 'Captura la cotización (mano de obra y piezas) antes de mandarla al cliente. Si no tiene costo para el cliente, usa "Reparar sin costo".');
+    const reenvio = r.estado === 'esperando_autorizacion';
+    if (!reenvio) {
+      await client.query(`UPDATE reparaciones SET estado = 'esperando_autorizacion', cotizacion_rechazada_at = NULL, cotizacion_rechazada_monto = NULL WHERE id = $1`, [r.id]);
+    }
+    await client.query(
+      `INSERT INTO reparacion_historial (reparacion_id, estado, nota, usuario_id) VALUES ($1, 'esperando_autorizacion', $2, $3)`,
+      [r.id, reenvio ? 'Cotización reenviada al cliente.' : `Cotización de ${dinero(r.total)} enviada al cliente.`, req.usuario.sub]
+    );
+    await client.query('COMMIT');
+  } catch (err) {
+    await client.query('ROLLBACK').catch(() => {});
+    return responderFallo(res, err);
+  } finally {
+    client.release();
+  }
+  const aviso = await avisarCliente(pool, { reparacionId: req.params.id, tipo: 'otro', construirMensaje: mensajeCotizacion, usuarioId: req.usuario.sub });
+  res.json({ id: req.params.id, estado: 'esperando_autorizacion', aviso });
+});
+
+// 1b. Reparacion sin costo para el cliente (por ejemplo garantia): no hay nada que autorizar, asi que pasa directo de
+// diagnostico a reparacion, sin aviso. Si el folio ya tiene costo se manda la cotizacion como siempre.
+router.post('/:id/reparar-sin-costo', requireRole('dueño', 'supervisor_taller', 'tecnico'), async (req, res) => {
+  const client = await pool.connect();
+  try {
+    await client.query('BEGIN');
+    const { rows } = await client.query(`SELECT id, estado, ubicacion, total FROM reparaciones WHERE id = $1 FOR UPDATE`, [req.params.id]);
+    const r = rows[0];
+    if (!r) throw falla(404, 'Reparación no encontrada.');
+    if (req.usuario.rol !== 'dueño' && r.ubicacion !== 'taller') throw falla(409, 'El equipo no está en el taller: recíbelo antes de trabajarlo.');
+    if (r.estado !== 'diagnostico') throw falla(409, 'Esto se hace desde el diagnóstico.');
+    if (Number(r.total) > 0) throw falla(409, 'Este folio ya tiene costo: mándale la cotización al cliente para que la autorice.');
+    await client.query(`UPDATE reparaciones SET estado = 'reparacion' WHERE id = $1`, [r.id]);
+    await client.query(
+      `INSERT INTO reparacion_historial (reparacion_id, estado, nota, usuario_id) VALUES ($1, 'reparacion', $2, $3)`,
+      [r.id, 'Sin costo para el cliente: pasa directo a reparación.', req.usuario.sub]
+    );
+    await client.query('COMMIT');
+    res.json({ id: r.id, estado: 'reparacion' });
+  } catch (err) {
+    await client.query('ROLLBACK').catch(() => {});
+    responderFallo(res, err);
+  } finally {
+    client.release();
+  }
+});
+
+// 2. La respuesta del cliente a la cotizacion (tambien llega por n8n, ver reparacionExterna.routes.js): si autoriza pasa
+// a reparacion y si no, se cancela directo y las piezas apartadas regresan al inventario.
+router.post('/:id/respuesta-cotizacion', requireRole('admin', 'vendedor'), async (req, res) => {
+  const { autoriza } = req.body ?? {};
+  if (typeof autoriza !== 'boolean') return res.status(400).json({ error: 'autoriza debe ser verdadero o falso.' });
+  const client = await pool.connect();
+  try {
+    await client.query('BEGIN');
+    const { rows } = await client.query(`SELECT id, folio, estado, total FROM reparaciones WHERE id = $1 FOR UPDATE`, [req.params.id]);
+    const r = rows[0];
+    if (!r) throw falla(404, 'Reparación no encontrada.');
+    if (r.estado !== 'esperando_autorizacion') throw falla(409, 'Este folio no está esperando la respuesta del cliente.');
+    if (autoriza) {
+      await client.query(`UPDATE reparaciones SET estado = 'reparacion', cotizacion_rechazada_at = NULL, cotizacion_rechazada_monto = NULL WHERE id = $1`, [r.id]);
+      await client.query(
+        `INSERT INTO reparacion_historial (reparacion_id, estado, nota, usuario_id) VALUES ($1, 'reparacion', $2, $3)`,
+        [r.id, `El cliente autorizó la cotización de ${dinero(r.total)}.`, req.usuario.sub]
+      );
+    } else {
+      await cancelarPorRechazo(client, r, { usuarioId: req.usuario.sub, nota: 'Cliente no autorizó la cotización.' });
+    }
+    await client.query('COMMIT');
+    res.json({ id: r.id, estado: autoriza ? 'reparacion' : 'cancelado' });
+  } catch (err) {
+    await client.query('ROLLBACK').catch(() => {});
+    responderFallo(res, err);
+  } finally {
+    client.release();
+  }
+});
+
+// 3. El tecnico confirma que termino: el folio pasa a "listo" (todavia en el taller) y se le avisa al cliente que ya
+// esta reparado y que se le avisara cuando llegue a la tienda.
+router.post('/:id/terminar-reparacion', requireRole('dueño', 'supervisor_taller', 'tecnico'), async (req, res) => {
+  const client = await pool.connect();
+  try {
+    await client.query('BEGIN');
+    const { rows } = await client.query(`SELECT id, folio, estado, ubicacion, origen_reparacion, producto_id, unidad_imei_id FROM reparaciones WHERE id = $1 FOR UPDATE`, [req.params.id]);
+    const r = rows[0];
+    if (!r) throw falla(404, 'Reparación no encontrada.');
+    if (req.usuario.rol !== 'dueño' && r.ubicacion !== 'taller') throw falla(409, 'El equipo no está en el taller: recíbelo antes de trabajarlo.');
+    if (r.estado !== 'reparacion') throw falla(409, 'Solo se termina una reparación que ya está autorizada y en reparación.');
+    await client.query(`UPDATE reparaciones SET estado = 'listo' WHERE id = $1`, [r.id]);
+    await client.query(
+      `INSERT INTO reparacion_historial (reparacion_id, estado, nota, usuario_id) VALUES ($1, 'listo', $2, $3)`,
+      [r.id, 'Reparación terminada: listo en el taller.', req.usuario.sub]
+    );
+    await reactivarCatalogoSiAplica(client, r, await obtenerConfiguracionTicket());
+    await client.query('COMMIT');
+  } catch (err) {
+    await client.query('ROLLBACK').catch(() => {});
+    return responderFallo(res, err);
+  } finally {
+    client.release();
+  }
+  const aviso = await avisarCliente(pool, { reparacionId: req.params.id, tipo: 'otro', construirMensaje: mensajeReparado, usuarioId: req.usuario.sub });
+  res.json({ id: req.params.id, estado: 'listo', aviso });
+});
+
 // Traslados del equipo (sucursal -> taller -> sucursal). Cada paso lo hace quien corresponde y solo
 // desde la ubicacion correcta; queda registrado quien y cuando en reparacion_traslados.
 const DONDE = {
@@ -512,7 +667,7 @@ const DONDE = {
   en_transito_sucursal: 'en camino a la sucursal',
 };
 
-async function cambiarUbicacion(req, res, { desde, hacia, sentido, llegada = false, validar = null }) {
+async function cambiarUbicacion(req, res, { desde, hacia, sentido, llegada = false, validar = null, alLlegar = null }) {
   const nota = typeof req.body?.nota === 'string' && req.body.nota.trim() ? req.body.nota.trim().slice(0, 300) : null;
   const client = await pool.connect();
   try {
@@ -555,7 +710,9 @@ async function cambiarUbicacion(req, res, { desde, hacia, sentido, llegada = fal
       [req.params.id, hacia]
     );
     await client.query('COMMIT');
-    res.json(nueva[0]);
+    // alLlegar: aviso al cliente cuando el equipo ya esta en la tienda (despues de guardar, no tumba el traslado).
+    const aviso = alLlegar ? await alLlegar(r) : undefined;
+    res.json(aviso ? { ...nueva[0], aviso } : nueva[0]);
   } catch (err) {
     await client.query('ROLLBACK');
     res.status(err.statusCode ?? 500).json({ error: err.statusCode ? err.message : 'Error interno del servidor.' });
@@ -585,7 +742,12 @@ router.post('/:id/enviar-a-sucursal', requireRole('dueño', 'supervisor_taller',
 );
 // ...y la sucursal confirma que lo recibio, para poder entregarlo.
 router.post('/:id/recibir-en-sucursal', requireRole('admin', 'vendedor'), (req, res) =>
-  cambiarUbicacion(req, res, { desde: 'en_transito_sucursal', hacia: 'sucursal', sentido: 'a_sucursal', llegada: true })
+  cambiarUbicacion(req, res, {
+    desde: 'en_transito_sucursal', hacia: 'sucursal', sentido: 'a_sucursal', llegada: true,
+    alLlegar: (r) => (r.estado === 'listo'
+      ? avisarCliente(pool, { reparacionId: r.id, tipo: 'reparacion_lista', construirMensaje: mensajeListoEnTienda, usuarioId: req.usuario.sub })
+      : null),
+  })
 );
 
 const CANALES_VALIDOS = ['whatsapp'];
@@ -695,9 +857,13 @@ router.post('/:id/abonos', requireRole('admin', 'vendedor'), async (req, res) =>
   try {
     await client.query('BEGIN');
 
-    const reparacionResult = await client.query(`SELECT total, monto_pagado FROM reparaciones WHERE id = $1 FOR UPDATE`, [req.params.id]);
+    const reparacionResult = await client.query(`SELECT total, monto_pagado, estado, ubicacion FROM reparaciones WHERE id = $1 FOR UPDATE`, [req.params.id]);
     const reparacion = reparacionResult.rows[0];
     if (!reparacion) throw Object.assign(new Error('Reparación no encontrada.'), { statusCode: 404 });
+    // El cobro se abre cuando el equipo esta listo y de regreso en la tienda (el anticipo se toma al recibirlo, en POST /).
+    if (req.usuario.rol !== 'dueño' && !(reparacion.estado === 'listo' && reparacion.ubicacion === 'sucursal')) {
+      throw Object.assign(new Error('El cobro se abre cuando el equipo está listo en la tienda.'), { statusCode: 409 });
+    }
 
     const saldoPendiente = Number(reparacion.total) - Number(reparacion.monto_pagado);
     if (Number(monto) > saldoPendiente) {
@@ -713,8 +879,19 @@ router.post('/:id/abonos', requireRole('admin', 'vendedor'), async (req, res) =>
     const nuevoMontoPagado = Number(reparacion.monto_pagado) + Number(monto);
     await client.query(`UPDATE reparaciones SET monto_pagado = $1 WHERE id = $2`, [nuevoMontoPagado, req.params.id]);
 
+    // Cobrado el total, el equipo se entrega: queda en el historial quien cobro y entrego.
+    const saldoFinal = Number(reparacion.total) - nuevoMontoPagado;
+    const entregado = saldoFinal <= 0 && reparacion.estado === 'listo' && reparacion.ubicacion === 'sucursal';
+    if (entregado) {
+      await client.query(`UPDATE reparaciones SET estado = 'entregado' WHERE id = $1`, [req.params.id]);
+      await client.query(
+        `INSERT INTO reparacion_historial (reparacion_id, estado, nota, usuario_id) VALUES ($1, 'entregado', $2, $3)`,
+        [req.params.id, 'Entregado al cubrir el cobro.', req.usuario.sub]
+      );
+    }
+
     await client.query('COMMIT');
-    res.status(201).json({ ...abono.rows[0], monto_pagado: nuevoMontoPagado, saldo_pendiente: Number(reparacion.total) - nuevoMontoPagado });
+    res.status(201).json({ ...abono.rows[0], monto_pagado: nuevoMontoPagado, saldo_pendiente: saldoFinal, entregado });
   } catch (err) {
     await client.query('ROLLBACK');
     res.status(err.statusCode ?? 500).json({ error: err.statusCode ? err.message : 'Error interno del servidor.' });
