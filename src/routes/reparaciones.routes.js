@@ -370,6 +370,17 @@ router.patch('/:id', async (req, res) => {
     return res.status(400).json({ error: 'equipo_enciende debe ser verdadero o falso.' });
   }
 
+  // El mostrador (vendedor) registra el equipo y lo entrega: no edita el folio. Por aqui solo puede pasar un equipo
+  // listo a "entregado" (y dejar una nota); costos, garantia, prioridad, fechas, notas, checklist, diagnostico y
+  // cancelar son del supervisor, del dueño o del taller. Cobrar y mover el equipo van por sus propias rutas.
+  if (req.usuario.rol === 'vendedor') {
+    const b = req.body ?? {};
+    const sobrantes = Object.keys(b).filter((k) => k !== 'estado' && k !== 'nota');
+    if (sobrantes.length > 0 || (b.estado !== undefined && b.estado !== actual.estado && b.estado !== 'entregado')) {
+      return res.status(403).json({ error: 'El mostrador solo puede registrar equipos y entregarlos. Los cambios al folio los hace el supervisor o el taller.' });
+    }
+  }
+
   // Reglas del recorrido del equipo (sucursal <-> taller). El dueño puede todo (correcciones).
   if (req.usuario.rol !== 'dueño') {
     const b = req.body ?? {};
@@ -731,6 +742,10 @@ function urlDeNuestroBucket(url) {
 router.post('/:id/fotos', async (req, res) => {
   const { estado, url } = req.body ?? {};
   if (!ESTADOS_VALIDOS.includes(estado)) return res.status(400).json({ error: 'Estado inválido.' });
+  // El mostrador solo sube las fotos de cuando recibe el equipo.
+  if (req.usuario.rol === 'vendedor' && estado !== 'recibido') {
+    return res.status(403).json({ error: 'El mostrador solo agrega las fotos de la recepción.' });
+  }
   if (!urlDeNuestroBucket(url)) return res.status(400).json({ error: 'URL de imagen inválida.' });
 
   const client = await pool.connect();
@@ -768,6 +783,7 @@ router.post('/:id/fotos', async (req, res) => {
 });
 
 router.delete('/:id/fotos/:fotoId', async (req, res) => {
+  if (req.usuario.rol === 'vendedor') return res.status(403).json({ error: 'El mostrador no puede quitar fotos del folio.' });
   const { rowCount } = await pool.query(
     `DELETE FROM reparacion_fotos WHERE id = $1 AND reparacion_id = $2`,
     [req.params.fotoId, req.params.id]
