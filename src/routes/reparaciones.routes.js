@@ -119,7 +119,7 @@ router.get('/', async (req, res) => {
     `SELECT r.id, r.folio, r.cliente_id, c.nombre AS cliente_nombre, r.sucursal_id,
             r.equipo_marca, r.equipo_modelo, r.imei_equipo, r.problema_reportado, r.diagnostico,
             r.estado, r.prioridad, r.tecnico_id, t.nombre AS tecnico_nombre,
-            r.costo_mano_obra, r.costo_refacciones, r.total, r.garantia_dias, r.cotizacion_aproximada,
+            r.costo_mano_obra, r.costo_refacciones, r.total, r.monto_pagado, r.garantia_dias, r.cotizacion_aproximada,
             r.origen_reparacion, r.producto_id, p.nombre AS producto_nombre, r.unidad_imei_id, r.created_at, r.updated_at,
             r.ubicacion, r.en_taller_desde, sc.nombre AS sucursal_nombre,
             (r.estado = 'esperando_autorizacion' AND r.cotizacion_rechazada_at IS NOT NULL AND r.cotizacion_rechazada_monto = r.total) AS cotizacion_rechazada
