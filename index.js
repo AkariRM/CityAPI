@@ -154,13 +154,6 @@ app.use('/apartado-externo', apartadoExternoRoutes);
 app.use('/opciones-equipo', opcionesEquipoRoutes);
 app.use('/vinculos-celular', vinculosCelularRoutes);
 
-// n8n de mentira para ver las pantallas con datos antes de tener los flujos reales de TRAI. Solo existe si N8N_SIMULADO=true;
-// sin esa variable la ruta ni se monta (404). Ver src/routes/n8nSimulado.routes.js.
-if (process.env.N8N_SIMULADO === 'true') {
-  app.use('/n8n-simulado', require('./src/routes/n8nSimulado.routes'));
-  console.warn('N8N_SIMULADO=true: /n8n-simulado activo (datos de prueba, no se lee ni se envía nada de verdad).');
-}
-
 app.use((req, res) => {
   res.status(404).json({ error: 'Ruta no encontrada.' });
 });
