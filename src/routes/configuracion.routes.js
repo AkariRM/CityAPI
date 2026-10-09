@@ -61,7 +61,16 @@ router.patch('/', requireRole('admin'), async (req, res) => {
     compras_precios_modo: req.body?.compras_precios_modo,
     compras_redondeo_multiplo: req.body?.compras_redondeo_multiplo,
     compras_redondeo_direccion: req.body?.compras_redondeo_direccion,
+    reparacion_margen_piezas_activo: req.body?.reparacion_margen_piezas_activo,
+    reparacion_margen_piezas_pct: req.body?.reparacion_margen_piezas_pct,
   };
+  if (fields.reparacion_margen_piezas_activo !== undefined && typeof fields.reparacion_margen_piezas_activo !== 'boolean') {
+    return res.status(400).json({ error: 'La ganancia sobre piezas debe ser verdadero o falso.' });
+  }
+  if (fields.reparacion_margen_piezas_pct !== undefined
+    && !(typeof fields.reparacion_margen_piezas_pct === 'number' && Number.isFinite(fields.reparacion_margen_piezas_pct) && fields.reparacion_margen_piezas_pct >= 0 && fields.reparacion_margen_piezas_pct <= 1000)) {
+    return res.status(400).json({ error: 'El porcentaje de ganancia sobre piezas debe ser un número entre 0 y 1000.' });
+  }
   if (fields.compras_precios_modo !== undefined && !['margen', 'mantener'].includes(fields.compras_precios_modo)) {
     return res.status(400).json({ error: "El modo de precios de las compras debe ser 'margen' o 'mantener'." });
   }

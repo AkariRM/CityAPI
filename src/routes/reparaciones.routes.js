@@ -5,6 +5,7 @@ const { alcanceReparaciones, enAlcance, sqlAlcance, esPersonalTaller } = require
 const { inicioDiaUTC, finDiaUTCExclusivo } = require('../utils/fechas');
 const { obtenerConfiguracionTicket } = require('../utils/configuracionTicket');
 const { registrarMovimientoRefaccion } = require('../utils/movimientosRefacciones');
+const { precioDePieza } = require('../utils/precioPiezas');
 const { avisarCliente, mensajeCotizacion, mensajeReparado, mensajeListoEnTienda } = require('../utils/notificarReparacion');
 const { ESTADOS_ANTES_DE_REPARAR, devolverPiezas, cancelarPorRechazo, dinero } = require('../utils/flujoReparacion');
 
@@ -180,7 +181,9 @@ router.get('/:id', async (req, res) => {
   );
 
   const refacciones = await pool.query(
-    `SELECT rr.id, rr.producto_id, rr.refaccion_id, COALESCE(p.nombre, ref.nombre) AS producto_nombre, rr.cantidad, rr.costo
+    // "costo" aqui es lo que se le cobra al cliente por la pieza (precio, o el costo en renglones anteriores): el costo
+    // real de la pieza solo lo ve la revision de costos.
+    `SELECT rr.id, rr.producto_id, rr.refaccion_id, COALESCE(p.nombre, ref.nombre) AS producto_nombre, rr.cantidad, COALESCE(rr.precio, rr.costo) AS costo
      FROM reparacion_refacciones rr
      LEFT JOIN productos p ON p.id = rr.producto_id
      LEFT JOIN refacciones ref ON ref.id = rr.refaccion_id
@@ -811,6 +814,8 @@ router.post('/:id/refacciones', requireRole('dueño', 'supervisor_taller', 'tecn
       throw Object.assign(new Error(`Stock insuficiente para "${stockRow?.nombre ?? refaccion_id}".`), { statusCode: 409 });
     }
     const costoFinal = costo !== undefined ? Number(costo) : cant * Number(stockRow.costo);
+    // Lo que se le cobra al cliente: el costo, o el costo mas la ganancia sobre piezas si esta encendida en Configuracion.
+    const precioFinal = await precioDePieza(client, costoFinal);
     await client.query(`UPDATE refacciones SET stock = stock - $1 WHERE id = $2`, [cant, refaccion_id]);
     await registrarMovimientoRefaccion(client, {
       refaccionId: refaccion_id, sucursalId: null, tipo: 'salida', cantidad: cant,
@@ -818,14 +823,15 @@ router.post('/:id/refacciones', requireRole('dueño', 'supervisor_taller', 'tecn
     });
 
     const refaccion = await client.query(
-      `INSERT INTO reparacion_refacciones (reparacion_id, producto_id, refaccion_id, cantidad, costo)
-       VALUES ($1, $2, $3, $4, $5)
-       RETURNING id, producto_id, refaccion_id, cantidad, costo`,
-      [req.params.id, null, refaccion_id, cant, costoFinal]
+      `INSERT INTO reparacion_refacciones (reparacion_id, producto_id, refaccion_id, cantidad, costo, precio)
+       VALUES ($1, $2, $3, $4, $5, $6)
+       RETURNING id, producto_id, refaccion_id, cantidad, precio AS costo`,
+      [req.params.id, null, refaccion_id, cant, costoFinal, precioFinal]
     );
 
+    // El total del folio suma lo que se le cobra al cliente (precio), no el costo real.
     const sumaResult = await client.query(
-      `SELECT COALESCE(sum(costo), 0) AS total FROM reparacion_refacciones WHERE reparacion_id = $1`,
+      `SELECT COALESCE(sum(COALESCE(precio, costo)), 0) AS total FROM reparacion_refacciones WHERE reparacion_id = $1`,
       [req.params.id]
     );
     await client.query(

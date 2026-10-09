@@ -4,6 +4,7 @@ const { requireAuth, requireRole } = require('../middleware/auth');
 const { alcanceReparaciones, enAlcance, sqlAlcance } = require('../utils/alcanceReparaciones');
 const { obtenerConfiguracionTicket } = require('../utils/configuracionTicket');
 const { registrarMovimientoRefaccion } = require('../utils/movimientosRefacciones');
+const { precioDePieza } = require('../utils/precioPiezas');
 
 const router = express.Router();
 
@@ -185,16 +186,18 @@ router.post('/:id/recibir', requireRole('dueño', 'supervisor_taller', 'tecnico'
 
     let reparacionRefaccionId = null;
     if (solicitud.producto_id || refaccionId) {
+      // Precio al cliente: el costo, o el costo mas la ganancia sobre piezas si esta encendida en Configuracion.
+      const precio = await precioDePieza(client, solicitud.costo_estimado);
       const refaccion = await client.query(
-        `INSERT INTO reparacion_refacciones (reparacion_id, producto_id, refaccion_id, cantidad, costo)
-         VALUES ($1, $2, $3, 1, $4)
+        `INSERT INTO reparacion_refacciones (reparacion_id, producto_id, refaccion_id, cantidad, costo, precio)
+         VALUES ($1, $2, $3, 1, $4, $5)
          RETURNING id`,
-        [solicitud.reparacion_id, solicitud.producto_id, refaccionId, solicitud.costo_estimado]
+        [solicitud.reparacion_id, solicitud.producto_id, refaccionId, solicitud.costo_estimado, precio]
       );
       reparacionRefaccionId = refaccion.rows[0].id;
 
       const suma = await client.query(
-        `SELECT COALESCE(sum(costo), 0) AS total FROM reparacion_refacciones WHERE reparacion_id = $1`,
+        `SELECT COALESCE(sum(COALESCE(precio, costo)), 0) AS total FROM reparacion_refacciones WHERE reparacion_id = $1`,
         [solicitud.reparacion_id]
       );
       await client.query(

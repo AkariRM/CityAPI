@@ -590,10 +590,23 @@ CREATE TABLE reparaciones (
   ubicacion          ubicacion_reparacion NOT NULL DEFAULT 'sucursal',
   -- Primera vez que el taller recibio el equipo. Un tecnico solo ve lo que ya recibio el taller.
   en_taller_desde    timestamptz,
+  -- Revision de costos (solo folios entregados, ver migracion_revision_costos.sql). NULL en costos_revisados_at =
+  -- pendiente de revisar. Al revisar se guarda una foto de las cifras: lo cobrado (monto_pagado), la mano de obra
+  -- que se le paga al tecnico por este folio, el costo real de las piezas y la utilidad. La fecha de entrega queda
+  -- aqui para que la lista de utilidad mensual no cambie si el historial se toca despues.
+  costos_revisados_at    timestamptz,
+  costos_revisados_por   uuid REFERENCES usuarios(id),
+  revision_entregado_at  timestamptz,
+  revision_reparacion    numeric(12,2),
+  revision_mano_obra     numeric(12,2) CHECK (revision_mano_obra >= 0),
+  revision_costo_piezas  numeric(12,2) CHECK (revision_costo_piezas >= 0),
+  revision_utilidad      numeric(12,2),
   created_at         timestamptz NOT NULL DEFAULT now(),
   updated_at         timestamptz NOT NULL DEFAULT now()
 );
 CREATE INDEX idx_reparaciones_estado ON reparaciones(estado);
+CREATE INDEX idx_reparaciones_costos_pendientes ON reparaciones(created_at) WHERE estado = 'entregado' AND costos_revisados_at IS NULL;
+CREATE INDEX idx_reparaciones_costos_revisados ON reparaciones(revision_entregado_at) WHERE costos_revisados_at IS NOT NULL;
 CREATE INDEX idx_reparaciones_ubicacion ON reparaciones(ubicacion);
 CREATE INDEX idx_reparaciones_tecnico ON reparaciones(tecnico_id);
 CREATE INDEX idx_reparaciones_cliente ON reparaciones(cliente_id);
@@ -644,7 +657,12 @@ CREATE TABLE reparacion_refacciones (
   producto_id    uuid REFERENCES productos(id),
   refaccion_id   uuid REFERENCES refacciones(id),
   cantidad       integer NOT NULL DEFAULT 1 CHECK (cantidad > 0),
+  -- Costo REAL de la pieza para el negocio (lo usa la revision de costos). Es lo que se carga al cliente solo si no
+  -- hay ganancia sobre piezas (ver precio).
   costo          numeric(12,2) NOT NULL DEFAULT 0,
+  -- Lo que se le cobra al cliente por la pieza: el costo mas la ganancia sobre piezas, si esta encendida en
+  -- Configuracion. NULL en renglones anteriores a esta columna: se toma el costo (COALESCE(precio, costo)).
+  precio         numeric(12,2) CHECK (precio >= 0),
   CONSTRAINT chk_reparacion_refaccion_identificada CHECK ((producto_id IS NOT NULL) <> (refaccion_id IS NOT NULL))
 );
 CREATE INDEX idx_reparacion_refacciones_reparacion ON reparacion_refacciones(reparacion_id);
@@ -1051,6 +1069,11 @@ CREATE TABLE configuracion_ticket (
   compras_precios_modo           text NOT NULL DEFAULT 'margen' CHECK (compras_precios_modo IN ('margen', 'mantener')),
   compras_redondeo_multiplo      numeric(8,2) NOT NULL DEFAULT 5 CHECK (compras_redondeo_multiplo >= 0),
   compras_redondeo_direccion     text NOT NULL DEFAULT 'arriba' CHECK (compras_redondeo_direccion IN ('arriba', 'abajo', 'cercano')),
+  -- Ganancia sobre las piezas de una reparacion (ver migracion_revision_costos.sql): apagada, la pieza se le cobra
+  -- al cliente a su costo (como siempre). Encendida, se cobra el costo mas este porcentaje (30 = 30%). El costo real
+  -- siempre queda guardado aparte para la revision de costos.
+  reparacion_margen_piezas_activo boolean NOT NULL DEFAULT false,
+  reparacion_margen_piezas_pct    numeric(6,2) NOT NULL DEFAULT 30 CHECK (reparacion_margen_piezas_pct >= 0 AND reparacion_margen_piezas_pct <= 1000),
   updated_at                  timestamptz NOT NULL DEFAULT now()
 );
 
