@@ -63,7 +63,12 @@ router.patch('/', requireRole('admin'), async (req, res) => {
     compras_redondeo_direccion: req.body?.compras_redondeo_direccion,
     reparacion_margen_piezas_activo: req.body?.reparacion_margen_piezas_activo,
     reparacion_margen_piezas_pct: req.body?.reparacion_margen_piezas_pct,
+    compras_margen_producto_nuevo: req.body?.compras_margen_producto_nuevo,
   };
+  if (fields.compras_margen_producto_nuevo !== undefined
+    && !(typeof fields.compras_margen_producto_nuevo === 'number' && Number.isFinite(fields.compras_margen_producto_nuevo) && fields.compras_margen_producto_nuevo >= 0 && fields.compras_margen_producto_nuevo <= 1000)) {
+    return res.status(400).json({ error: 'El margen de los productos nuevos debe ser un número entre 0 y 1000.' });
+  }
   if (fields.reparacion_margen_piezas_activo !== undefined && typeof fields.reparacion_margen_piezas_activo !== 'boolean') {
     return res.status(400).json({ error: 'La ganancia sobre piezas debe ser verdadero o falso.' });
   }

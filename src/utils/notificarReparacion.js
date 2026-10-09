@@ -1,7 +1,7 @@
 const { llamarWebhookN8n } = require('./n8n');
 
 // Avisos al cliente por cada fase de una reparacion (cotizacion, reparada, lista en tienda). Reusan el webhook de
-// notificaciones de n8n que ya existe (N8N_WEBHOOK_NOTIFICAR_CLIENTE, ver CityPhone_Guia_Integracion_n8n.txt B6): el
+// notificaciones de n8n que ya existe (N8N_WEBHOOK_NOTIFICAR_CLIENTE, ver CityPhone_Referencia_n8n_Endpoints_y_Webhooks.txt B6): el
 // servidor manda el aviso con el telefono registrado del cliente y n8n lo redacta y lo manda por WhatsApp.
 //
 // Un aviso que falla NUNCA tumba el cambio de fase: el folio ya avanzo. Se registra en notificaciones_cliente y quien
@@ -43,7 +43,7 @@ function mensajeListoEnTienda(r) {
   );
 }
 
-// tipo: 'otro' | 'reparacion_lista' (valores del contrato). construirMensaje: (reparacion) => texto.
+// tipo: 'otro' | 'reparacion_lista' (valores del formato acordado con n8n, ver B6). construirMensaje: (reparacion) => texto.
 // Devuelve { estado: 'enviado' | 'pendiente' | 'fallido' | 'omitido', error }:
 //   enviado   n8n confirmo el envio ({status: 'ok'}).
 //   pendiente n8n recibio el aviso pero no confirmo el envio (acuse generico, workflow sin "Respond to Webhook" al final).

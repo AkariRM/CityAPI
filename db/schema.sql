@@ -209,9 +209,12 @@ CREATE TABLE proveedores (
   telefono    text,
   email       text,
   notas       text,
+  -- RFC del proveedor: con el se reconoce al emisor de una factura leida (XML, PDF o foto) la proxima vez.
+  rfc         text,
   activo      boolean NOT NULL DEFAULT true,
   created_at  timestamptz NOT NULL DEFAULT now()
 );
+CREATE INDEX idx_proveedores_rfc ON proveedores(upper(rfc)) WHERE rfc IS NOT NULL;
 
 CREATE TABLE productos (
   id             uuid PRIMARY KEY DEFAULT gen_random_uuid(),
@@ -902,6 +905,9 @@ CREATE TABLE compras (
   -- Folio de la factura/ticket del proveedor (el interno es "folio"). Dos compras registradas del mismo
   -- proveedor no pueden repetirlo (indice unico de abajo); al cancelar una se libera.
   folio_proveedor     text,
+  -- UUID del timbre fiscal (CFDI) cuando la compra se registro leyendo el XML de la factura: una misma factura no se
+  -- registra dos veces aunque cambie el folio capturado (indice unico de abajo).
+  uuid_factura        text,
   fecha_factura       date NOT NULL DEFAULT current_date,
   -- 0.16 si los costos capturados ya traen IVA (el promedio se calcula sin IVA); 0 si no.
   iva_tasa            numeric(4,3) NOT NULL DEFAULT 0 CHECK (iva_tasa >= 0 AND iva_tasa <= 1),
@@ -927,6 +933,8 @@ CREATE INDEX idx_compras_sucursal ON compras(sucursal_id, created_at DESC);
 CREATE INDEX idx_compras_proveedor ON compras(proveedor_id);
 CREATE UNIQUE INDEX idx_compras_proveedor_folio ON compras(proveedor_id, lower(folio_proveedor))
   WHERE folio_proveedor IS NOT NULL AND estado = 'registrada';
+CREATE UNIQUE INDEX idx_compras_uuid_factura ON compras(lower(uuid_factura))
+  WHERE uuid_factura IS NOT NULL AND estado = 'registrada';
 
 CREATE TABLE compra_items (
   id                 uuid PRIMARY KEY DEFAULT gen_random_uuid(),
@@ -1069,6 +1077,9 @@ CREATE TABLE configuracion_ticket (
   compras_precios_modo           text NOT NULL DEFAULT 'margen' CHECK (compras_precios_modo IN ('margen', 'mantener')),
   compras_redondeo_multiplo      numeric(8,2) NOT NULL DEFAULT 5 CHECK (compras_redondeo_multiplo >= 0),
   compras_redondeo_direccion     text NOT NULL DEFAULT 'arriba' CHECK (compras_redondeo_direccion IN ('arriba', 'abajo', 'cercano')),
+  -- Margen que se sugiere sobre el costo para el precio de venta de un producto NUEVO que se da de alta desde una factura
+  -- leida en Compras (40 = costo + 40%). La persona lo puede cambiar en la propia pantalla antes de crear los productos.
+  compras_margen_producto_nuevo  numeric(6,2) NOT NULL DEFAULT 40 CHECK (compras_margen_producto_nuevo >= 0 AND compras_margen_producto_nuevo <= 1000),
   -- Ganancia sobre las piezas de una reparacion (ver migracion_revision_costos.sql): apagada, la pieza se le cobra
   -- al cliente a su costo (como siempre). Encendida, se cobra el costo mas este porcentaje (30 = 30%). El costo real
   -- siempre queda guardado aparte para la revision de costos.

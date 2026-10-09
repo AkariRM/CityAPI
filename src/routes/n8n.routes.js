@@ -196,7 +196,7 @@ router.post('/cm/generar-recurso', requireRole('admin', 'community_manager'), as
 // 4 — Publicacion de contenido con IA (enrutado por red social)
 // OJO: a diferencia del resto, este endpoint SI publica de verdad en la
 // red social correspondiente del lado de n8n — no es una simulacion.
-// Contrato confirmado por TRAI (CityPhone_Webhooks_Backend.txt): "imagen" es
+// Formato confirmado por TRAI (CityPhone_Webhooks_Backend.txt): "imagen" es
 // obligatoria (URL publica o base64 sin prefijo), "fecha_programada" solo se
 // exige cuando modo_publicacion es "programado", y url_publicacion en la
 // respuesta SIEMPRE viene null en este paso (no hay endpoint aun para

@@ -4,6 +4,9 @@ const { requireAuth, requireRole } = require('../middleware/auth');
 const { obtenerConfiguracionTicket } = require('../utils/configuracionTicket');
 const { inicioDiaUTC, finDiaUTCExclusivo } = require('../utils/fechas');
 const { TASA_IVA, calcularImporte, planificarRenglon, totalesCompra } = require('../utils/compras');
+const { leerCfdi } = require('../utils/facturaCfdi');
+const { construirPropuesta, esRfc, sinAcentos } = require('../utils/facturaPropuesta');
+const { MAX_BYTES_XML, decodificarArchivo, detectarArchivo, leerFacturaConIA } = require('../utils/facturaIA');
 
 // Compras de inventario: las registra quien recibe y paga, o sea el dueño o el supervisor (requireRole('admin')
 // deja pasar al dueño tambien). El vendedor ya no da de alta productos ni toca costos (productos.routes.js).
@@ -185,6 +188,74 @@ router.post('/previsualizar', async (req, res) => {
   }
 });
 
+// Lee una factura (XML del SAT, PDF o foto) y propone la compra: proveedor, folio, fecha, renglones con el producto que
+// parece corresponder y el IVA. No guarda nada: la persona revisa y confirma en la pantalla. El XML se lee aqui mismo; el
+// PDF y la foto los lee la IA de n8n (N8N_WEBHOOK_LEER_FACTURA). El tipo se detecta por el contenido del archivo.
+router.post('/leer-factura', async (req, res) => {
+  try {
+    const { nombre, contenido_base64: contenido } = req.body ?? {};
+    const buffer = decodificarArchivo(contenido);
+    const archivo = detectarArchivo(buffer);
+    if (!archivo) throw falla(400, 'El archivo debe ser el XML de la factura, un PDF o una foto (JPG, PNG o WEBP).');
+    let factura;
+    if (archivo.tipo === 'xml') {
+      if (buffer.length > MAX_BYTES_XML) throw falla(413, 'El XML pesa más de 2 MB: no parece una factura.');
+      factura = leerCfdi(buffer.toString('utf8'));
+    } else {
+      factura = await leerFacturaConIA({ archivo, buffer, nombre, usuarioId: req.usuario.sub });
+    }
+    res.json({ ...(await construirPropuesta(pool, factura)), archivo: archivo.tipo });
+  } catch (err) {
+    responderError(res, err);
+  }
+});
+
+// Da de alta de una vez los accesorios de una factura que todavia no existen en el inventario. Solo nombre y precio de venta
+// (el costo y las existencias los pone la compra al registrarse). Todo o nada: si uno falla no se crea ninguno, para no dejar
+// altas a medias. No deja crear un producto con el mismo nombre que uno activo (casi siempre es el mismo producto).
+const norm = (t) => sinAcentos(t).toLowerCase().replace(/\s+/g, ' ').trim();
+router.post('/productos-nuevos', async (req, res) => {
+  const client = await pool.connect();
+  try {
+    const lista = req.body?.productos;
+    if (!Array.isArray(lista) || lista.length === 0) throw falla(400, 'No hay productos por crear.');
+    if (lista.length > MAX_RENGLONES) throw falla(400, `Se pueden crear hasta ${MAX_RENGLONES} productos a la vez.`);
+    const vistos = new Set();
+    const productos = lista.map((p, i) => {
+      const n = i + 1;
+      const nombre = typeof p?.nombre === 'string' ? p.nombre.trim().replace(/\s+/g, ' ') : '';
+      if (!nombre) throw falla(400, `Producto ${n}: el nombre es requerido.`);
+      if (nombre.length > 200) throw falla(400, `Producto ${n}: el nombre es demasiado largo (máximo 200 caracteres).`);
+      if (!(esNumero(p.precio_venta) && p.precio_venta > 0 && p.precio_venta <= 100000000)) throw falla(400, `"${nombre}": el precio de venta debe ser mayor a 0.`);
+      if (vistos.has(norm(nombre))) throw falla(400, `"${nombre}" está repetido: crea un solo producto y suma las cantidades.`);
+      vistos.add(norm(nombre));
+      return { nombre, precio_venta: Math.round((p.precio_venta + Number.EPSILON) * 100) / 100 };
+    });
+
+    await client.query('BEGIN');
+    const existentes = await client.query(`SELECT nombre FROM productos WHERE activo AND tipo = 'accesorio'`);
+    const yaExiste = new Set(existentes.rows.map((r) => norm(r.nombre)));
+    for (const p of productos) {
+      if (yaExiste.has(norm(p.nombre))) throw falla(409, `"${p.nombre}" ya existe en tu inventario: elígelo en lugar de crearlo.`);
+    }
+    const creados = [];
+    for (const p of productos) {
+      const { rows } = await client.query(
+        `INSERT INTO productos (nombre, tipo, usa_imei, precio_venta, costo, activo) VALUES ($1, 'accesorio', false, $2, 0, true) RETURNING id, sku, nombre, precio_venta`,
+        [p.nombre, p.precio_venta]
+      );
+      creados.push({ id: rows[0].id, sku: rows[0].sku, nombre: rows[0].nombre, precio_venta: Number(rows[0].precio_venta), costo: 0, stock_total: 0 });
+    }
+    await client.query('COMMIT');
+    res.status(201).json(creados);
+  } catch (err) {
+    await client.query('ROLLBACK').catch(() => {});
+    responderError(res, err);
+  } finally {
+    client.release();
+  }
+});
+
 // fecha_factura sale como texto 'YYYY-MM-DD': node-pg convierte un DATE a medianoche del servidor (UTC) y en Mexico eso se leeria
 // como el dia anterior.
 router.get('/', async (req, res) => {
@@ -267,6 +338,12 @@ router.post('/', async (req, res) => {
       if (new Date(`${body.fecha_factura}T00:00:00Z`).getTime() > Date.now() + 36 * 3600 * 1000) throw falla(400, 'La fecha de la factura no puede ser futura.');
     }
     const comentario = typeof body.comentario === 'string' ? body.comentario.trim().slice(0, 500) : '';
+    // Solo cuando la compra viene de una factura leida: el UUID del timbre (evita registrarla dos veces) y el RFC del
+    // proveedor (se guarda si todavia no lo tenia, para reconocerlo la proxima vez).
+    const uuidFactura = typeof body.uuid_factura === 'string' && body.uuid_factura.trim() ? body.uuid_factura.trim().toUpperCase() : null;
+    if (uuidFactura && !/^[0-9A-F]{8}-[0-9A-F]{4}-[0-9A-F]{4}-[0-9A-F]{4}-[0-9A-F]{12}$/.test(uuidFactura)) throw falla(400, 'El UUID de la factura no es válido.');
+    const proveedorRfc = typeof body.proveedor_rfc === 'string' && body.proveedor_rfc.trim() ? body.proveedor_rfc.trim().toUpperCase() : null;
+    if (proveedorRfc && !esRfc(proveedorRfc)) throw falla(400, 'El RFC del proveedor no es válido.');
     const renglones = validarRenglones(body.items);
     const pagadoDeCaja = body.forma_pago === 'efectivo' && body.pagado_de_caja !== false;
 
@@ -286,17 +363,24 @@ router.post('/', async (req, res) => {
 
     const totales = totalesCompra(plan.map((p) => p.plan.importe), opciones.iva_tasa);
 
+    if (uuidFactura) {
+      const repetida = await client.query(`SELECT folio FROM compras WHERE lower(uuid_factura) = lower($1) AND estado = 'registrada' LIMIT 1`, [uuidFactura]);
+      if (repetida.rows[0]) throw falla(409, `Esa factura ya está registrada en la compra ${repetida.rows[0].folio}.`);
+    }
+
     const compraRow = await client.query(
       `INSERT INTO compras (proveedor_id, sucursal_id, folio_proveedor, fecha_factura, iva_tasa, forma_pago, pagado_de_caja,
-                            subtotal, total, precios_modo, redondeo_multiplo, redondeo_direccion, comentario, usuario_id)
-       VALUES ($1, $2, $3, COALESCE($4::date, current_date), $5, $6, $7, $8, $9, $10, $11, $12, $13, $14)
+                            subtotal, total, precios_modo, redondeo_multiplo, redondeo_direccion, comentario, usuario_id, uuid_factura)
+       VALUES ($1, $2, $3, COALESCE($4::date, current_date), $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15)
        RETURNING id, folio, created_at`,
       [
         body.proveedor_id, sucursalId, folioProveedor || null, body.fecha_factura || null, opciones.iva_tasa, body.forma_pago, pagadoDeCaja,
         totales.subtotal, totales.total, opciones.precios_modo, opciones.redondeo_multiplo, opciones.redondeo_direccion, comentario || null, req.usuario.sub,
+        uuidFactura,
       ]
     );
     const compra = compraRow.rows[0];
+    if (proveedorRfc) await client.query(`UPDATE proveedores SET rfc = $2 WHERE id = $1 AND rfc IS NULL`, [body.proveedor_id, proveedorRfc]);
     const motivoKardex = `Compra ${compra.folio} · ${proveedor.rows[0].nombre}${folioProveedor ? ` · factura ${folioProveedor}` : ''}`;
 
     for (const { item, producto, plan: p } of plan) {
@@ -367,6 +451,7 @@ router.post('/', async (req, res) => {
     if (err.code === '23505') {
       const texto = `${err.constraint ?? ''} ${err.message ?? ''}`;
       if (texto.includes('idx_compras_proveedor_folio')) return responderError(res, falla(409, 'Ya hay una compra registrada de este proveedor con ese folio.'));
+      if (texto.includes('idx_compras_uuid_factura')) return responderError(res, falla(409, 'Esa factura ya está registrada en otra compra.'));
       if (texto.includes('idx_producto_proveedor_claves_clave')) return responderError(res, falla(409, 'Esa clave ya está ligada a otro producto de este proveedor.'));
     }
     responderError(res, err);
