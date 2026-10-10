@@ -6,7 +6,7 @@ const { inicioDiaUTC, finDiaUTCExclusivo } = require('../utils/fechas');
 const { obtenerConfiguracionTicket } = require('../utils/configuracionTicket');
 const { registrarMovimientoRefaccion } = require('../utils/movimientosRefacciones');
 const { precioDePieza } = require('../utils/precioPiezas');
-const { avisarCliente, mensajeCotizacion, mensajeReparado, mensajeListoEnTienda } = require('../utils/notificarReparacion');
+const { avisarCliente, mensajeCotizacion, mensajeReparado, mensajeListoEnTienda, datosCotizacion, datosReparado, datosListoEnTienda } = require('../utils/notificarReparacion');
 const { ESTADOS_ANTES_DE_REPARAR, devolverPiezas, cancelarPorRechazo, dinero } = require('../utils/flujoReparacion');
 
 const router = express.Router();
@@ -572,7 +572,7 @@ router.post('/:id/enviar-cotizacion', requireRole('dueño', 'supervisor_taller',
   } finally {
     client.release();
   }
-  const aviso = await avisarCliente(pool, { reparacionId: req.params.id, tipo: 'otro', construirMensaje: mensajeCotizacion, usuarioId: req.usuario.sub });
+  const aviso = await avisarCliente(pool, { reparacionId: req.params.id, tipo: 'otro', construirMensaje: mensajeCotizacion, construirDatos: datosCotizacion, usuarioId: req.usuario.sub });
   res.json({ id: req.params.id, estado: 'esperando_autorizacion', aviso });
 });
 
@@ -658,7 +658,7 @@ router.post('/:id/terminar-reparacion', requireRole('dueño', 'supervisor_taller
   } finally {
     client.release();
   }
-  const aviso = await avisarCliente(pool, { reparacionId: req.params.id, tipo: 'otro', construirMensaje: mensajeReparado, usuarioId: req.usuario.sub });
+  const aviso = await avisarCliente(pool, { reparacionId: req.params.id, tipo: 'otro', construirMensaje: mensajeReparado, construirDatos: datosReparado, usuarioId: req.usuario.sub });
   res.json({ id: req.params.id, estado: 'listo', aviso });
 });
 
@@ -749,7 +749,7 @@ router.post('/:id/recibir-en-sucursal', requireRole('admin', 'vendedor'), (req, 
   cambiarUbicacion(req, res, {
     desde: 'en_transito_sucursal', hacia: 'sucursal', sentido: 'a_sucursal', llegada: true,
     alLlegar: (r) => (r.estado === 'listo'
-      ? avisarCliente(pool, { reparacionId: r.id, tipo: 'reparacion_lista', construirMensaje: mensajeListoEnTienda, usuarioId: req.usuario.sub })
+      ? avisarCliente(pool, { reparacionId: r.id, tipo: 'reparacion_lista', construirMensaje: mensajeListoEnTienda, construirDatos: datosListoEnTienda, usuarioId: req.usuario.sub })
       : null),
   })
 );

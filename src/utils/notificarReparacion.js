@@ -43,16 +43,37 @@ function mensajeListoEnTienda(r) {
   );
 }
 
+// Datos separados de cada aviso (campo "datos" del webhook B6, ademas del texto en "mensaje"). tipo_aviso dice cual es.
+function datosBase(r, tipoAviso) {
+  return {
+    tipo_aviso: tipoAviso,
+    folio: r.folio,
+    equipo: { marca: r.equipo_marca ?? null, modelo: r.equipo_modelo ?? null, nombre: nombreEquipo(r) },
+    monto: Number(r.total),
+    saldo_pendiente: Math.max(0, Number(r.total) - Number(r.monto_pagado ?? 0)),
+    sucursal: {
+      nombre: r.sucursal_nombre ?? null,
+      direccion: r.sucursal_direccion?.trim() || null,
+      telefono: r.sucursal_telefono?.trim() || null,
+      horario: r.sucursal_horario?.trim() || null,
+    },
+  };
+}
+const datosCotizacion = (r) => ({ ...datosBase(r, 'cotizacion'), diagnostico: r.diagnostico?.trim() || null, responder: 'SI o NO' });
+const datosReparado = (r) => datosBase(r, 'reparado');
+const datosListoEnTienda = (r) => datosBase(r, 'listo_en_tienda');
+
 // tipo: 'otro' | 'reparacion_lista' (valores del formato acordado con n8n, ver B6). construirMensaje: (reparacion) => texto.
 // Devuelve { estado: 'enviado' | 'pendiente' | 'fallido' | 'omitido', error }:
 //   enviado   n8n confirmo el envio ({status: 'ok'}).
 //   pendiente n8n recibio el aviso pero no confirmo el envio (acuse generico, workflow sin "Respond to Webhook" al final).
 //   fallido   sin telefono valido, webhook sin configurar, n8n respondio error o no se pudo contactar.
 //   omitido   la reparacion no tiene cliente (equipo propio): no hay a quien avisar.
-async function avisarCliente(pool, { reparacionId, tipo, construirMensaje, usuarioId }) {
+async function avisarCliente(pool, { reparacionId, tipo, construirMensaje, construirDatos, usuarioId }) {
   const { rows } = await pool.query(
     `SELECT r.id, r.folio, r.sucursal_id, r.equipo_marca, r.equipo_modelo, r.diagnostico, r.total, r.monto_pagado, r.cliente_id,
-            c.nombre AS cliente_nombre, c.telefono AS cliente_telefono, s.nombre AS sucursal_nombre
+            c.nombre AS cliente_nombre, c.telefono AS cliente_telefono, s.nombre AS sucursal_nombre,
+            s.direccion AS sucursal_direccion, s.telefono AS sucursal_telefono, s.horario AS sucursal_horario
      FROM reparaciones r
      LEFT JOIN clientes c ON c.id = r.cliente_id
      LEFT JOIN sucursales s ON s.id = r.sucursal_id
@@ -84,6 +105,8 @@ async function avisarCliente(pool, { reparacionId, tipo, construirMensaje, usuar
           cliente: { nombre: r.cliente_nombre, telefono },
           referencia_id: r.folio,
           mensaje,
+          // Lo mismo que dice el mensaje, ya separado, para que el agente lo use sin tener que leer el texto.
+          datos: construirDatos ? construirDatos(r) : undefined,
         },
         { timeoutMs: 20000, reintentar: false }
       );
@@ -107,4 +130,4 @@ async function avisarCliente(pool, { reparacionId, tipo, construirMensaje, usuar
   return { estado, error };
 }
 
-module.exports = { avisarCliente, telefonoE164, mensajeCotizacion, mensajeReparado, mensajeListoEnTienda };
+module.exports = { avisarCliente, telefonoE164, mensajeCotizacion, mensajeReparado, mensajeListoEnTienda, datosCotizacion, datosReparado, datosListoEnTienda };
