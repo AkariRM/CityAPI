@@ -8,6 +8,27 @@ const router = express.Router();
 
 router.use(requireAuth);
 
+// Codigo del producto (SKU o codigo de barras): texto corto, sin espacios de mas. Vacio = sin codigo (null). Devuelve
+// { error } si no sirve o { valor } (undefined = no viene, null = sin codigo, texto = el codigo).
+const MAX_SKU = 60;
+function normalizarSku(sku) {
+  if (sku === undefined) return { valor: undefined };
+  if (sku === null) return { valor: null };
+  if (typeof sku !== 'string') return { error: 'El código debe ser texto.' };
+  const limpio = sku.trim();
+  if (limpio.length > MAX_SKU) return { error: `El código debe tener máximo ${MAX_SKU} caracteres.` };
+  return { valor: limpio || null };
+}
+
+// Otro producto con ese mismo codigo (sin importar mayusculas), o null. excluirId: el producto que se esta editando.
+async function productoConCodigo(db, sku, excluirId = null) {
+  const { rows } = await db.query(
+    `SELECT id, nombre FROM productos WHERE lower(sku) = lower($1) AND ($2::uuid IS NULL OR id <> $2::uuid) LIMIT 1`,
+    [sku, excluirId]
+  );
+  return rows[0] ?? null;
+}
+
 // El listado tambien lo usa el tecnico para buscar refacciones al armar un
 // folio de reparacion, y el community manager para el catalogo de solo
 // lectura y para vincular equipos en Marketplace; las demas rutas (alta,
@@ -150,6 +171,13 @@ router.post('/', requireRole('admin'), async (req, res) => {
   const cantidad = Number(stock_inicial) || 0;
   if (sucursal_id && cantidad < 0) return res.status(400).json({ error: 'La cantidad inicial no puede ser negativa.' });
 
+  const codigo = normalizarSku(sku);
+  if (codigo.error) return res.status(400).json({ error: codigo.error });
+  if (codigo.valor) {
+    const repetido = await productoConCodigo(pool, codigo.valor);
+    if (repetido) return res.status(409).json({ error: `Ya existe un producto con ese código: "${repetido.nombre}".` });
+  }
+
   const client = await pool.connect();
   try {
     await client.query('BEGIN');
@@ -159,7 +187,7 @@ router.post('/', requireRole('admin'), async (req, res) => {
        VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $17, $18)
        RETURNING id, sku, nombre, categoria_id, tipo, marca, modelo, ram, almacenamiento, procesador, color, usa_imei, precio_venta, costo, precio_mayoreo, precio_revendedor, imagen_url, proveedor_id, activo`,
       [
-        sku || null, nombre.trim(), categoria_id || null, tipo, marca || null, modelo || null,
+        codigo.valor ?? null, nombre.trim(), categoria_id || null, tipo, marca || null, modelo || null,
         ram || null, almacenamiento || null, procesador || null, color || null, usa_imei === false ? false : true,
         precio_venta ?? 0, costo ?? 0, precio_mayoreo ?? null, precio_revendedor ?? null, imagen_url || null, proveedor_id || null,
         activo === false ? false : true,
@@ -184,6 +212,8 @@ router.post('/', requireRole('admin'), async (req, res) => {
     res.status(201).json({ ...producto.rows[0], stock: cantidad });
   } catch (err) {
     await client.query('ROLLBACK');
+    // Dos altas a la vez con el mismo codigo: la que llega segunda choca con el indice unico.
+    if (err.code === '23505' && /sku/.test(err.constraint ?? err.detail ?? '')) return res.status(409).json({ error: 'Ya existe un producto con ese código.' });
     console.error(err);
     res.status(500).json({ error: 'Error interno del servidor.' });
   } finally {
@@ -199,7 +229,14 @@ router.patch('/:id', requireRole('admin', 'vendedor'), async (req, res) => {
   if (req.body?.costo !== undefined && !esAdminODueno(req.usuario.rol)) {
     return res.status(403).json({ error: 'Solo el administrador o el supervisor puede cambiar el costo.' });
   }
+  const codigo = normalizarSku(req.body?.sku);
+  if (codigo.error) return res.status(400).json({ error: codigo.error });
+  if (codigo.valor && /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i.test(req.params.id)) {
+    const repetido = await productoConCodigo(pool, codigo.valor, req.params.id);
+    if (repetido) return res.status(409).json({ error: `Ya existe un producto con ese código: "${repetido.nombre}".` });
+  }
   const fields = {
+    sku: codigo.valor,
     nombre: req.body?.nombre,
     tipo: req.body?.tipo,
     categoria_id: req.body?.categoria_id,
@@ -230,11 +267,17 @@ router.patch('/:id', requireRole('admin', 'vendedor'), async (req, res) => {
   if (sets.length === 0) return res.status(400).json({ error: 'No hay campos para actualizar.' });
 
   values.push(req.params.id);
-  const { rows } = await pool.query(
-    `UPDATE productos SET ${sets.join(', ')} WHERE id = $${i}
-     RETURNING id, sku, nombre, categoria_id, tipo, marca, modelo, ram, almacenamiento, procesador, color, usa_imei, precio_venta, costo, precio_mayoreo, precio_revendedor, imagen_url, proveedor_id, activo`,
-    values
-  );
+  let rows;
+  try {
+    ({ rows } = await pool.query(
+      `UPDATE productos SET ${sets.join(', ')} WHERE id = $${i}
+       RETURNING id, sku, nombre, categoria_id, tipo, marca, modelo, ram, almacenamiento, procesador, color, usa_imei, precio_venta, costo, precio_mayoreo, precio_revendedor, imagen_url, proveedor_id, activo`,
+      values
+    ));
+  } catch (err) {
+    if (err.code === '23505' && /sku/.test(err.constraint ?? err.detail ?? '')) return res.status(409).json({ error: 'Ya existe un producto con ese código.' });
+    throw err;
+  }
   if (!rows[0]) return res.status(404).json({ error: 'Producto no encontrado.' });
   res.json(rows[0]);
 });
