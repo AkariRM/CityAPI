@@ -19,6 +19,13 @@ async function devolverPiezas(client, { reparacionId, folio, usuarioId }) {
     });
   }
   if (rows.length > 0) {
+    // Una pieza que llego por una solicitud "recibida" deja la solicitud ligada a su renglon: se suelta la liga (la
+    // solicitud queda como registro) o la llave foranea impide borrar el renglon y la cancelacion truena.
+    await client.query(
+      `UPDATE reparacion_solicitudes_pieza SET reparacion_refaccion_id = NULL
+       WHERE reparacion_refaccion_id IN (SELECT id FROM reparacion_refacciones WHERE reparacion_id = $1)`,
+      [reparacionId]
+    );
     await client.query(`DELETE FROM reparacion_refacciones WHERE reparacion_id = $1`, [reparacionId]);
     await client.query(`UPDATE reparaciones SET costo_refacciones = 0, total = costo_mano_obra WHERE id = $1`, [reparacionId]);
   }
