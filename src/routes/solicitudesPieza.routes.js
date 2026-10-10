@@ -31,7 +31,7 @@ router.get('/', async (req, res) => {
 
   const { rows } = await pool.query(
     `SELECT sp.id, sp.reparacion_id, r.folio, r.sucursal_id, sp.producto_id, sp.refaccion_id, COALESCE(p.nombre, ref.nombre, sp.nombre_libre) AS producto_nombre, sp.nombre_libre, sp.descripcion_libre,
-            sp.costo_estimado, sp.estado, sp.motivo_rechazo,
+            sp.costo_estimado, sp.estado, sp.motivo_rechazo, sp.reparacion_refaccion_id,
             sp.solicitado_por, us.nombre AS solicitado_por_nombre,
             sp.aprobado_por, ua.nombre AS aprobado_por_nombre,
             sp.created_at, sp.updated_at

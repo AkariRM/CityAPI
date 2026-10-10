@@ -151,6 +151,7 @@ router.get('/:id', async (req, res) => {
     const { rows } = await pool.query(
       `SELECT r.id, r.folio, r.estado, r.origen_reparacion, r.sucursal_id, sc.nombre AS sucursal_nombre, c.nombre AS cliente_nombre,
               r.equipo_marca, r.equipo_modelo, t.nombre AS tecnico_nombre, r.total, r.monto_pagado,
+              r.problema_reportado, r.diagnostico,
               ${FECHA_ENTREGA} AS entregado_at, ${COSTO_PIEZAS} AS costo_piezas,
               r.costos_revisados_at, rv.nombre AS revisado_por_nombre, r.revision_entregado_at, r.revision_reparacion,
               r.revision_mano_obra, r.revision_costo_piezas, r.revision_utilidad

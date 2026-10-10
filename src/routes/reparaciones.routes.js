@@ -46,6 +46,7 @@ const MENSAJE_FUERA_DEL_TALLER = {
 const ESTADOS_VALIDOS = ['recibido', 'diagnostico', 'esperando_autorizacion', 'reparacion', 'listo', 'entregado', 'cancelado'];
 const PRIORIDADES_VALIDAS = ['baja', 'media', 'alta'];
 const METODOS_PAGO_VALIDOS = ['efectivo', 'tarjeta'];
+const MAX_OBSERVACIONES_RECEPCION = 500;
 
 // Un equipo propio (compra_propia) que termina su revision reaparece en catalogo si el toggle esta encendido.
 async function reactivarCatalogoSiAplica(client, r, configTicket) {
@@ -156,7 +157,7 @@ router.get('/:id', async (req, res) => {
             r.equipo_marca, r.equipo_modelo, r.imei_equipo, r.equipo_contrasena, r.equipo_enciende, r.problema_reportado, r.diagnostico,
             r.estado, r.prioridad, r.tecnico_id, t.nombre AS tecnico_nombre,
             r.costo_mano_obra, r.costo_refacciones, r.total, r.garantia_dias, r.monto_pagado,
-            r.fecha_estimada_entrega, r.nota_para_cliente, r.checklist_revision, r.cotizacion_aproximada,
+            r.fecha_estimada_entrega, r.nota_para_cliente, r.checklist_revision, r.cotizacion_aproximada, r.observaciones_recepcion,
             r.cotizacion_rechazada_at, r.cotizacion_rechazada_monto,
             (r.estado = 'esperando_autorizacion' AND r.cotizacion_rechazada_at IS NOT NULL AND r.cotizacion_rechazada_monto = r.total) AS cotizacion_rechazada,
             r.origen_reparacion, r.producto_id, prod.nombre AS producto_nombre, prod.activo AS producto_activo, r.unidad_imei_id, r.created_at, r.updated_at,
@@ -254,7 +255,7 @@ router.get('/:id', async (req, res) => {
 router.post('/', requireRole('admin', 'vendedor'), async (req, res) => {
   const {
     cliente_id, sucursal_id, telefono, telefono_adicional, equipo_marca, equipo_modelo, imei_equipo, equipo_contrasena, problema_reportado, prioridad,
-    equipo_enciende, origen_reparacion, producto_id, unidad_imei_id, anticipo, anticipo_metodo, cotizacion_aproximada,
+    equipo_enciende, origen_reparacion, producto_id, unidad_imei_id, anticipo, anticipo_metodo, cotizacion_aproximada, observaciones_recepcion,
   } = req.body ?? {};
 
   const esCompraPropia = origen_reparacion === 'compra_propia';
@@ -276,6 +277,16 @@ router.post('/', requireRole('admin', 'vendedor'), async (req, res) => {
     cotizacionAproximada = Number(cotizacion_aproximada);
     if (!(Number.isFinite(cotizacionAproximada) && cotizacionAproximada >= 0)) {
       return res.status(400).json({ error: 'La cotización aproximada debe ser un número mayor o igual a 0.' });
+    }
+  }
+  // Observaciones adicionales (opcional): estado fisico del equipo, accesorios que deja el cliente, cualquier detalle de la recepcion.
+  // Vacio o en blanco = sin observaciones.
+  let observaciones = null;
+  if (observaciones_recepcion !== undefined && observaciones_recepcion !== null) {
+    if (typeof observaciones_recepcion !== 'string') return res.status(400).json({ error: 'Las observaciones deben ser texto.' });
+    observaciones = observaciones_recepcion.trim() || null;
+    if (observaciones && observaciones.length > MAX_OBSERVACIONES_RECEPCION) {
+      return res.status(400).json({ error: `Las observaciones no pueden pasar de ${MAX_OBSERVACIONES_RECEPCION} caracteres.` });
     }
   }
   // Anticipo opcional al recibir el equipo: dinero que el cliente deja de entrada, antes de que se
@@ -314,15 +325,15 @@ router.post('/', requireRole('admin', 'vendedor'), async (req, res) => {
     }
 
     const reparacion = await client.query(
-      `INSERT INTO reparaciones (cliente_id, sucursal_id, equipo_marca, equipo_modelo, imei_equipo, equipo_contrasena, problema_reportado, prioridad, origen_reparacion, producto_id, unidad_imei_id, equipo_enciende, cotizacion_aproximada)
-       VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13)
+      `INSERT INTO reparaciones (cliente_id, sucursal_id, equipo_marca, equipo_modelo, imei_equipo, equipo_contrasena, problema_reportado, prioridad, origen_reparacion, producto_id, unidad_imei_id, equipo_enciende, cotizacion_aproximada, observaciones_recepcion)
+       VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14)
        RETURNING id, folio, estado, created_at`,
       [
         esCompraPropia ? null : cliente_id, sucursal_id, equipo_marca || null, equipo_modelo || null, imei_equipo || null,
         equipo_contrasena || null, problema_reportado.trim(), prioridadFinal,
         esCompraPropia ? 'compra_propia' : 'cliente', producto_id || null, unidad_imei_id || null,
         typeof equipo_enciende === 'boolean' ? equipo_enciende : null,
-        esCompraPropia ? null : cotizacionAproximada,
+        esCompraPropia ? null : cotizacionAproximada, observaciones,
       ]
     );
 
@@ -873,6 +884,88 @@ router.post('/:id/refacciones', requireRole('dueño', 'supervisor_taller', 'tecn
 
     await client.query('COMMIT');
     res.status(201).json(refaccion.rows[0]);
+  } catch (err) {
+    await client.query('ROLLBACK');
+    res.status(err.statusCode ?? 500).json({ error: err.statusCode ? err.message : 'Error interno del servidor.' });
+    if (!err.statusCode) console.error(err);
+  } finally {
+    client.release();
+  }
+});
+
+// Quita una pieza del folio (por si se eligio la que no era). :renglonId es el id del renglon de reparacion_refacciones.
+// - Antes de que el cliente autorice (recibido, diagnostico, esperando autorizacion) la pieza solo esta apartada: el taller puede
+//   quitarla. Ya empezada la reparacion solo el dueño (correcciones). Un folio cancelado o entregado no se toca.
+// - Una pieza tomada del inventario regresa al inventario (con su movimiento). Una pieza que llego por una solicitud ya se compro
+//   por fuera y nunca descontó inventario: al quitarla no entra al stock; la solicitud queda como registro, sin liga al folio.
+// - El total del folio se recalcula (mano de obra + lo que quede de piezas).
+router.delete('/:id/refacciones/:renglonId', requireRole('dueño', 'supervisor_taller', 'tecnico'), async (req, res) => {
+  if (!UUID_RE.test(req.params.renglonId)) return res.status(404).json({ error: 'Pieza no encontrada en este folio.' });
+
+  const client = await pool.connect();
+  try {
+    await client.query('BEGIN');
+    const folioResult = await client.query(
+      `SELECT id, folio, estado, ubicacion FROM reparaciones WHERE id = $1 FOR UPDATE`,
+      [req.params.id]
+    );
+    const folio = folioResult.rows[0];
+    if (!folio) throw Object.assign(new Error('Reparación no encontrada.'), { statusCode: 404 });
+    const esDueno = req.usuario.rol === 'dueño';
+    if (folio.estado === 'cancelado') {
+      throw Object.assign(new Error('El folio está cancelado: sus piezas ya regresaron al inventario.'), { statusCode: 409 });
+    }
+    if (folio.estado === 'entregado') {
+      throw Object.assign(new Error('El folio ya se entregó: no se pueden quitar piezas.'), { statusCode: 409 });
+    }
+    if (!esDueno && folio.ubicacion !== 'taller') {
+      throw Object.assign(new Error('El equipo no está en el taller: recíbelo antes de mover piezas.'), { statusCode: 409 });
+    }
+    if (!esDueno && !ESTADOS_ANTES_DE_REPARAR.includes(folio.estado)) {
+      throw Object.assign(new Error('La reparación ya empezó: la pieza ya se usó. Si hay que corregirla, pídeselo al dueño.'), { statusCode: 409 });
+    }
+
+    const renglonResult = await client.query(
+      `SELECT rr.id, rr.refaccion_id, rr.producto_id, rr.cantidad, COALESCE(ref.nombre, p.nombre) AS nombre,
+              EXISTS (SELECT 1 FROM reparacion_solicitudes_pieza sp WHERE sp.reparacion_refaccion_id = rr.id) AS viene_de_solicitud
+       FROM reparacion_refacciones rr
+       LEFT JOIN refacciones ref ON ref.id = rr.refaccion_id
+       LEFT JOIN productos p ON p.id = rr.producto_id
+       WHERE rr.id = $1 AND rr.reparacion_id = $2
+       FOR UPDATE OF rr`,
+      [req.params.renglonId, req.params.id]
+    );
+    const renglon = renglonResult.rows[0];
+    if (!renglon) throw Object.assign(new Error('Pieza no encontrada en este folio.'), { statusCode: 404 });
+    if (!renglon.refaccion_id) {
+      throw Object.assign(new Error('Esta pieza viene del catálogo de accesorios y no se puede quitar desde aquí.'), { statusCode: 409 });
+    }
+
+    const regresaAlInventario = !renglon.viene_de_solicitud;
+    if (regresaAlInventario) {
+      await client.query(`UPDATE refacciones SET stock = stock + $1 WHERE id = $2`, [renglon.cantidad, renglon.refaccion_id]);
+      await registrarMovimientoRefaccion(client, {
+        refaccionId: renglon.refaccion_id, sucursalId: null, tipo: 'entrada', cantidad: renglon.cantidad,
+        motivo: `Quitada de la reparación ${folio.folio}`, usuarioId: req.usuario.sub,
+      });
+    }
+    await client.query(`UPDATE reparacion_solicitudes_pieza SET reparacion_refaccion_id = NULL WHERE reparacion_refaccion_id = $1`, [renglon.id]);
+    await client.query(`DELETE FROM reparacion_refacciones WHERE id = $1`, [renglon.id]);
+
+    const suma = await client.query(
+      `SELECT COALESCE(sum(COALESCE(precio, costo)), 0) AS total FROM reparacion_refacciones WHERE reparacion_id = $1`,
+      [req.params.id]
+    );
+    const actualizado = await client.query(
+      `UPDATE reparaciones SET costo_refacciones = $1, total = costo_mano_obra + $1 WHERE id = $2 RETURNING costo_refacciones, total`,
+      [suma.rows[0].total, req.params.id]
+    );
+
+    await client.query('COMMIT');
+    res.json({
+      quitada: renglon.nombre, cantidad: renglon.cantidad, regreso_al_inventario: regresaAlInventario,
+      costo_refacciones: actualizado.rows[0].costo_refacciones, total: actualizado.rows[0].total,
+    });
   } catch (err) {
     await client.query('ROLLBACK');
     res.status(err.statusCode ?? 500).json({ error: err.statusCode ? err.message : 'Error interno del servidor.' });

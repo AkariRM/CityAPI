@@ -610,6 +610,9 @@ CREATE TABLE reparaciones (
   -- (aparece en Recepcion/Entrega para devolverlo). Solo aplica a cancelados, el folio sigue "cancelado" (no pasa a entregado:
   -- no hay cobro ni revision de costos). Ver migracion_devolver_equipo_cancelado.sql.
   equipo_devuelto_at     timestamptz,
+  -- Texto libre y opcional que escribe el mostrador al recibir el equipo (estado fisico, accesorios que deja el cliente...).
+  -- No es el problema reportado ni el diagnostico. Ver migracion_observaciones_recepcion.sql.
+  observaciones_recepcion text,
   created_at         timestamptz NOT NULL DEFAULT now(),
   updated_at         timestamptz NOT NULL DEFAULT now()
 );
