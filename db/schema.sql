@@ -94,6 +94,8 @@ CREATE TABLE sucursales (
   nombre              text NOT NULL,
   direccion           text,
   telefono            text,
+  -- Horario de atencion en texto libre ("Lun a Sab 10 a 19 h, Dom 11 a 15 h"): lo lee el agente de WhatsApp.
+  horario             text,
   fondo_caja_default  numeric(12,2) NOT NULL DEFAULT 0,
   -- 'compartida': un solo cajon fisico para toda la sucursal -- el corte de caja suma lo que
   -- vendio/cobro CUALQUIERA que haya trabajado ahi durante el turno, sin importar quien lo cierre.
@@ -1100,6 +1102,27 @@ CREATE TABLE opciones_equipo (
   created_at  timestamptz NOT NULL DEFAULT now(),
   UNIQUE (clave)
 );
+
+-- Politicas oficiales del negocio (garantia, pagos, apartados, envios...): lo unico que el agente de WhatsApp puede
+-- afirmar sobre esos temas. Las edita el dueño en Administracion > Politicas. contenido vacio = pendiente de definir
+-- (el agente no las ve). tema es la clave estable (sin acentos); titulo es como se muestra. Ver migracion_politicas_horario.sql.
+CREATE TABLE politicas_negocio (
+  id          uuid PRIMARY KEY DEFAULT gen_random_uuid(),
+  tema        text NOT NULL UNIQUE,
+  titulo      text NOT NULL,
+  contenido   text NOT NULL DEFAULT '',
+  activo      boolean NOT NULL DEFAULT true,
+  orden       integer NOT NULL DEFAULT 0,
+  created_at  timestamptz NOT NULL DEFAULT now(),
+  updated_at  timestamptz NOT NULL DEFAULT now()
+);
+INSERT INTO politicas_negocio (tema, titulo, orden) VALUES
+  ('garantia', 'Garantía', 1),
+  ('pagos', 'Formas de pago', 2),
+  ('apartados', 'Apartados', 3),
+  ('envios', 'Envíos', 4),
+  ('diagnostico', 'Diagnóstico de reparaciones', 5),
+  ('facturacion', 'Facturación', 6);
 
 -- ============================================================================
 -- AUREA (segunda empresa de CityCorp — tienda de maquillaje/beauty/perfumes)
