@@ -606,6 +606,10 @@ CREATE TABLE reparaciones (
   revision_mano_obra     numeric(12,2) CHECK (revision_mano_obra >= 0),
   revision_costo_piezas  numeric(12,2) CHECK (revision_costo_piezas >= 0),
   revision_utilidad      numeric(12,2),
+  -- Un folio CANCELADO sigue en la tienda hasta que el equipo se le devuelve al cliente: NULL = el equipo todavia no se devuelve
+  -- (aparece en Recepcion/Entrega para devolverlo). Solo aplica a cancelados, el folio sigue "cancelado" (no pasa a entregado:
+  -- no hay cobro ni revision de costos). Ver migracion_devolver_equipo_cancelado.sql.
+  equipo_devuelto_at     timestamptz,
   created_at         timestamptz NOT NULL DEFAULT now(),
   updated_at         timestamptz NOT NULL DEFAULT now()
 );

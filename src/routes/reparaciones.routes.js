@@ -114,7 +114,8 @@ router.get('/', async (req, res) => {
   const { estado, tecnico_id, sucursal_id, q, desde, hasta, ubicacion, abiertas } = req.query;
   const alcance = alcanceReparaciones(req.usuario);
   if (alcance.sinAcceso) return res.json([]);
-  // ubicacion: una o varias separadas por coma; abiertas=true: sin las entregadas ni canceladas.
+  // ubicacion: una o varias separadas por coma; abiertas=true: sin las entregadas ni las canceladas cuyo equipo ya se devolvio
+  // (un cancelado sigue "abierto" mientras el equipo no se le devuelva al cliente).
   const ubicaciones = ubicacion ? String(ubicacion).split(',').map((u) => u.trim()).filter((u) => UBICACIONES_VALIDAS.includes(u)) : null;
   const { rows } = await pool.query(
     `SELECT r.id, r.folio, r.cliente_id, c.nombre AS cliente_nombre, r.sucursal_id,
@@ -122,7 +123,7 @@ router.get('/', async (req, res) => {
             r.estado, r.prioridad, r.tecnico_id, t.nombre AS tecnico_nombre,
             r.costo_mano_obra, r.costo_refacciones, r.total, r.monto_pagado, r.garantia_dias, r.cotizacion_aproximada,
             r.origen_reparacion, r.producto_id, p.nombre AS producto_nombre, r.unidad_imei_id, r.created_at, r.updated_at,
-            r.ubicacion, r.en_taller_desde, sc.nombre AS sucursal_nombre,
+            r.ubicacion, r.en_taller_desde, r.equipo_devuelto_at, sc.nombre AS sucursal_nombre,
             (r.estado = 'esperando_autorizacion' AND r.cotizacion_rechazada_at IS NOT NULL AND r.cotizacion_rechazada_monto = r.total) AS cotizacion_rechazada
      FROM reparaciones r
      LEFT JOIN clientes c ON c.id = r.cliente_id
@@ -138,7 +139,7 @@ router.get('/', async (req, res) => {
        AND ($7::uuid IS NULL OR r.tecnico_id = $7::uuid)
        AND ($8::uuid IS NULL OR r.sucursal_id = $8::uuid)
        AND ($9::text[] IS NULL OR r.ubicacion::text = ANY($9::text[]))
-       AND ($10::boolean IS NOT TRUE OR r.estado NOT IN ('entregado', 'cancelado'))${sqlAlcance(alcance)}
+       AND ($10::boolean IS NOT TRUE OR (r.estado <> 'entregado' AND NOT (r.estado = 'cancelado' AND r.equipo_devuelto_at IS NOT NULL)))${sqlAlcance(alcance)}
      ORDER BY r.created_at DESC`,
     [
       estado || null, tecnico_id || null, sucursal_id || null, q || null, desde ? inicioDiaUTC(desde) : null, hasta ? finDiaUTCExclusivo(hasta) : null,
@@ -159,7 +160,7 @@ router.get('/:id', async (req, res) => {
             r.cotizacion_rechazada_at, r.cotizacion_rechazada_monto,
             (r.estado = 'esperando_autorizacion' AND r.cotizacion_rechazada_at IS NOT NULL AND r.cotizacion_rechazada_monto = r.total) AS cotizacion_rechazada,
             r.origen_reparacion, r.producto_id, prod.nombre AS producto_nombre, prod.activo AS producto_activo, r.unidad_imei_id, r.created_at, r.updated_at,
-            r.ubicacion, r.en_taller_desde
+            r.ubicacion, r.en_taller_desde, r.equipo_devuelto_at
      FROM reparaciones r
      LEFT JOIN clientes c ON c.id = r.cliente_id
      JOIN sucursales s ON s.id = r.sucursal_id
@@ -752,6 +753,37 @@ router.post('/:id/recibir-en-sucursal', requireRole('admin', 'vendedor'), (req, 
       : null),
   })
 );
+
+// Devolver al cliente el equipo de un folio CANCELADO (no autorizo la cotizacion o se cancelo a mano): ya de regreso en la
+// sucursal, el mostrador se lo entrega. El folio sigue "cancelado" (no pasa a entregado: no hay cobro ni revision de costos);
+// solo se marca la fecha para que deje de aparecer en Recepcion/Entrega.
+router.post('/:id/devolver-equipo', requireRole('admin', 'vendedor'), async (req, res) => {
+  const client = await pool.connect();
+  try {
+    await client.query('BEGIN');
+    const { rows } = await client.query(
+      `SELECT id, folio, estado, ubicacion, equipo_devuelto_at, cliente_id FROM reparaciones WHERE id = $1 FOR UPDATE`,
+      [req.params.id]
+    );
+    const r = rows[0];
+    if (!r) throw falla(404, 'Reparación no encontrada.');
+    if (r.estado !== 'cancelado') throw falla(409, 'Solo se devuelve el equipo de un folio cancelado. Los demás se entregan.');
+    if (r.equipo_devuelto_at) throw falla(409, 'El equipo de este folio ya se devolvió.');
+    if (r.ubicacion !== 'sucursal') throw falla(409, `Este equipo está ${DONDE[r.ubicacion]}: recíbelo en la sucursal para poder devolverlo.`);
+    await client.query(`UPDATE reparaciones SET equipo_devuelto_at = now() WHERE id = $1`, [r.id]);
+    await client.query(
+      `INSERT INTO reparacion_historial (reparacion_id, estado, nota, usuario_id) VALUES ($1, 'cancelado', $2, $3)`,
+      [r.id, r.cliente_id ? 'Equipo devuelto al cliente (reparación cancelada).' : 'Equipo regresado a la tienda (reparación cancelada).', req.usuario.sub]
+    );
+    await client.query('COMMIT');
+    res.json({ id: r.id, folio: r.folio, estado: 'cancelado', equipo_devuelto: true });
+  } catch (err) {
+    await client.query('ROLLBACK').catch(() => {});
+    responderFallo(res, err);
+  } finally {
+    client.release();
+  }
+});
 
 const CANALES_VALIDOS = ['whatsapp'];
 
