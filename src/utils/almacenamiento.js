@@ -11,12 +11,15 @@ const EXTENSIONES = { 'image/jpeg': 'jpg', 'image/png': 'png', 'image/webp': 'we
 // de una foto de celular tal cual. MINIATURA: lo que se usa en catalogo,
 // Punto de venta, etc. — es la causa real de que hoy tarden en cargar las
 // tarjetas (se estaba sirviendo la foto completa hasta para eso).
+// Tope de megapixeles de una imagen que se sube. Una imagen puede pesar menos de 1 MB y abrirse a cientos de megapixeles (una "bomba de
+// pixeles"): decodificarla gasta cientos de MB de memoria y tumba el servidor. Una foto de celular es de 12 a 48 megapixeles.
+const LIMITE_PIXELES = 64 * 1000 * 1000;
 const LADO_MAX_ORIGINAL = 1600;
 const LADO_MAX_MINIATURA = 320;
 const SUFIJO_MINIATURA = '-thumb';
 
 async function redimensionar(buffer, ladoMax, calidad, mimeType) {
-  let pipeline = sharp(buffer).resize({
+  let pipeline = sharp(buffer, { limitInputPixels: LIMITE_PIXELES }).resize({
     width: ladoMax,
     height: ladoMax,
     fit: 'inside',
@@ -68,6 +71,10 @@ async function subirBufferABucket(buffer, mimeType) {
       redimensionar(buffer, LADO_MAX_MINIATURA, 75, mimeType),
     ]);
   } catch (err) {
+    // Demasiado grande en pixeles: se rechaza (no se sube "tal cual", seria guardar la bomba para que otros la abran).
+    if (/pixel limit/i.test(err?.message ?? '')) {
+      throw Object.assign(new Error(`La imagen es demasiado grande (más de ${LIMITE_PIXELES / 1e6} megapíxeles). Sube una foto más chica.`), { statusCode: 400 });
+    }
     // Si sharp no pudo procesar el archivo por alguna razon, se sube la
     // original tal cual llego en vez de fallar la subida completa — sin
     // miniatura esta vez, ProductImage.jsx ya sabe caer de vuelta a la
@@ -123,4 +130,20 @@ function detectarTipoReal(buffer) {
   return null;
 }
 
-module.exports = { subirBufferABucket, EXTENSIONES, detectarTipoReal };
+// La URL de una imagen solo puede venir de nuestro propio bucket (la que devuelve POST /uploads/imagen): estas imagenes terminan en
+// catalogos y mensajes que se mandan a los clientes, asi que no se acepta un enlace externo arbitrario.
+function urlDeNuestroBucket(url) {
+  if (typeof url !== 'string' || url.length > 2048 || !url.startsWith('https://')) return false;
+  const base = process.env.SUPABASE_URL;
+  return base ? url.startsWith(`${base}/storage/v1/object/public/`) : true;
+}
+
+// Mensaje de error si la imagen que llega no se puede aceptar, o null. Sin imagen (null o vacio) y la que el registro ya tenia se aceptan:
+// asi un producto viejo con una direccion externa puede seguir guardandose sin cambiarla, pero no se le puede poner una nueva externa.
+function errorDeImagenUrl(url, actual = null) {
+  if (url === undefined || url === null || url === '') return null;
+  if (url === actual) return null;
+  return urlDeNuestroBucket(url) ? null : 'La imagen debe subirse desde la app: no se aceptan direcciones externas.';
+}
+
+module.exports = { subirBufferABucket, EXTENSIONES, detectarTipoReal, urlDeNuestroBucket, errorDeImagenUrl, LIMITE_PIXELES };

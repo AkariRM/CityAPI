@@ -3,6 +3,7 @@ const { pool } = require('../db');
 const { requireAuth, requireRole, esAdminODueno } = require('../middleware/auth');
 const { inicioDiaUTC, finDiaUTCExclusivo } = require('../utils/fechas');
 const { liberarApartadosVencidos } = require('../utils/apartados');
+const { errorDeImagenUrl } = require('../utils/almacenamiento');
 
 const router = express.Router();
 
@@ -167,6 +168,8 @@ router.post('/', requireRole('admin'), async (req, res) => {
   if (!['nuevo', 'usado', 'accesorio', 'servicio'].includes(tipo)) {
     return res.status(400).json({ error: 'Tipo inválido.' });
   }
+  const errorImagen = errorDeImagenUrl(imagen_url);
+  if (errorImagen) return res.status(400).json({ error: errorImagen });
 
   const cantidad = Number(stock_inicial) || 0;
   if (sucursal_id && cantidad < 0) return res.status(400).json({ error: 'La cantidad inicial no puede ser negativa.' });
@@ -231,6 +234,11 @@ router.patch('/:id', requireRole('admin', 'vendedor'), async (req, res) => {
   }
   const codigo = normalizarSku(req.body?.sku);
   if (codigo.error) return res.status(400).json({ error: codigo.error });
+  if (req.body?.imagen_url && /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i.test(req.params.id)) {
+    const imagenActual = (await pool.query('SELECT imagen_url FROM productos WHERE id = $1', [req.params.id])).rows[0]?.imagen_url ?? null;
+    const errorImagen = errorDeImagenUrl(req.body.imagen_url, imagenActual);
+    if (errorImagen) return res.status(400).json({ error: errorImagen });
+  }
   if (codigo.valor && /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i.test(req.params.id)) {
     const repetido = await productoConCodigo(pool, codigo.valor, req.params.id);
     if (repetido) return res.status(409).json({ error: `Ya existe un producto con ese código: "${repetido.nombre}".` });
@@ -468,6 +476,8 @@ router.get('/:id/imagenes', requireRole('admin', 'vendedor', 'community_manager'
 router.post('/:id/imagenes', requireRole('admin', 'vendedor'), async (req, res) => {
   const { imagen_url } = req.body ?? {};
   if (!imagen_url) return res.status(400).json({ error: 'imagen_url es requerida.' });
+  const errorImagen = errorDeImagenUrl(imagen_url);
+  if (errorImagen) return res.status(400).json({ error: errorImagen });
 
   const client = await pool.connect();
   try {

@@ -6,6 +6,7 @@ const { inicioDiaUTC, finDiaUTCExclusivo } = require('../utils/fechas');
 const { obtenerConfiguracionTicket } = require('../utils/configuracionTicket');
 const { registrarMovimientoRefaccion } = require('../utils/movimientosRefacciones');
 const { precioDePieza } = require('../utils/precioPiezas');
+const { urlDeNuestroBucket } = require('../utils/almacenamiento');
 const { avisarCliente, mensajeCotizacion, mensajeReparado, mensajeListoEnTienda, datosCotizacion, datosReparado, datosListoEnTienda } = require('../utils/notificarReparacion');
 const { ESTADOS_ANTES_DE_REPARAR, devolverPiezas, cancelarPorRechazo, dinero } = require('../utils/flujoReparacion');
 
@@ -1033,15 +1034,6 @@ router.post('/:id/abonos', requireRole('admin', 'vendedor'), async (req, res) =>
 });
 
 const MAX_FOTOS_POR_ESTADO = 5;
-
-// La URL solo puede venir de nuestro propio bucket (la que devuelve
-// POST /uploads/imagen) -- estas fotos terminan mandandose al cliente por
-// WhatsApp, asi que no se acepta un enlace externo arbitrario.
-function urlDeNuestroBucket(url) {
-  if (typeof url !== 'string' || url.length > 2048 || !url.startsWith('https://')) return false;
-  const base = process.env.SUPABASE_URL;
-  return base ? url.startsWith(`${base}/storage/v1/object/public/`) : true;
-}
 
 // Fotos del folio por estado (1-5 cada uno) -- sirven para que el agente de
 // WhatsApp le responda al cliente con la foto del estado actual (ver

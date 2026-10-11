@@ -2,6 +2,7 @@ const express = require('express');
 const { pool } = require('../db');
 const { requireAuth, requireRole, requireEmpresa } = require('../middleware/auth');
 const { inicioDiaUTC, finDiaUTCExclusivo } = require('../utils/fechas');
+const { errorDeImagenUrl } = require('../utils/almacenamiento');
 
 const router = express.Router();
 // Fase 1: sin sucursales, un solo stock global por producto. dueño y admin
@@ -51,6 +52,8 @@ router.post('/', async (req, res) => {
   const { nombre, categoria, precio_venta, costo, stock_cantidad, proveedor_id, imagen_url } = req.body ?? {};
   if (!nombre?.trim()) return res.status(400).json({ error: 'El nombre es requerido.' });
   if (!(Number(precio_venta) >= 0)) return res.status(400).json({ error: 'El precio de venta es requerido.' });
+  const errorImagen = errorDeImagenUrl(imagen_url);
+  if (errorImagen) return res.status(400).json({ error: errorImagen });
 
   const cantidad = Number(stock_cantidad) || 0;
 
@@ -85,6 +88,11 @@ router.post('/', async (req, res) => {
 });
 
 router.patch('/:id', async (req, res) => {
+  if (req.body?.imagen_url && /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i.test(req.params.id)) {
+    const imagenActual = (await pool.query('SELECT imagen_url FROM aurea_productos WHERE id = $1', [req.params.id])).rows[0]?.imagen_url ?? null;
+    const errorImagen = errorDeImagenUrl(req.body.imagen_url, imagenActual);
+    if (errorImagen) return res.status(400).json({ error: errorImagen });
+  }
   const fields = {
     nombre: req.body?.nombre,
     categoria: req.body?.categoria,
