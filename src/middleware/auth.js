@@ -6,6 +6,9 @@ const { verifySession } = require('../utils/jwt');
 // para que desactivar una cuenta o cambiarle el rol surta efecto de inmediato,
 // en vez de esperar a que expire un token ya emitido.
 async function requireAuth(req, res, next) {
+  // Ya autenticada en esta misma peticion (ej. el guardia de empresa montado en index.js antes del router, que tambien
+  // lo trae): no se vuelve a consultar la base. req.usuario solo lo escribe este middleware, nunca viene del cliente.
+  if (req.usuario) return next();
   const header = req.headers.authorization ?? '';
   const token = header.startsWith('Bearer ') ? header.slice(7) : null;
   if (!token) return res.status(401).json({ error: 'Falta el token de sesión.' });
@@ -62,6 +65,16 @@ function requireEmpresa(slug) {
   };
 }
 
+// Guardia de las rutas que son SOLO de CityPhone (ventas, nominas, finanzas, reparaciones...). Las de Áurea ya exigen
+// requireEmpresa('aurea'); sin este guardia un Supervisor de Áurea (rol 'admin', sin sucursal) podia leer y operar los datos
+// de CityPhone, porque los roles no distinguen empresa. El dueño siempre pasa. Una cuenta sin empresa asignada (cuentas muy
+// antiguas; las nuevas siempre la traen) se trata como de CityPhone para no dejarla fuera: bloquea solo a quien es de otra.
+function soloCityPhone(req, res, next) {
+  const empresa = req.usuario?.empresa_slug;
+  if (req.usuario?.rol === 'dueño' || !empresa || empresa === 'cityphone') return next();
+  return res.status(403).json({ error: 'No tienes acceso a esta empresa.' });
+}
+
 // Mismo criterio de jerarquia que requireRole()'s puedeComoDueno, pero para
 // los chequeos de rol escritos a mano dentro del cuerpo de una ruta (ej.
 // "solo el admin puede omitir sucursal_id") que no pasan por requireRole y
@@ -70,4 +83,4 @@ function esAdminODueno(rol) {
   return rol === 'admin' || rol === 'dueño';
 }
 
-module.exports = { requireAuth, requireRole, requireEmpresa, esAdminODueno };
+module.exports = { requireAuth, requireRole, requireEmpresa, soloCityPhone, esAdminODueno };

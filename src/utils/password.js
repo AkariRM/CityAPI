@@ -1,8 +1,8 @@
 const bcrypt = require('bcryptjs');
 const crypto = require('crypto');
 
-// Contraseñas para entrar con correo. Mismo bcrypt que el PIN (ver utils/pin.js): por eso el PIN actual de cada
-// persona sirve como contraseña mientras dure la transicion (el cifrado es el mismo).
+// Contraseñas para entrar con correo (bcrypt). Las cuentas que venian del PIN de 4 digitos conservan su cifrado como contraseña hasta
+// que la cambian: al entrar con una contraseña corta el servidor avisa (debe_cambiar_password) y la app obliga a cambiarla.
 const LARGO_MINIMO = 8;
 // bcrypt solo lee los primeros 72 bytes: mas alla de eso dos contraseñas distintas darian el mismo cifrado.
 const BYTES_MAXIMOS = 72;

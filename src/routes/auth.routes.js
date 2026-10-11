@@ -1,7 +1,6 @@
 const express = require('express');
 const rateLimit = require('express-rate-limit');
 const { pool } = require('../db');
-const { verifyPin } = require('../utils/pin');
 const {
   isValidPassword, MENSAJE_PASSWORD, hashPassword, verifyPassword, hashInservible, HASH_FALSO, normalizarCorreo, esCorreoValido,
 } = require('../utils/password');
@@ -35,11 +34,10 @@ const loginLimiter = rateLimit({
   message: { error: 'Demasiados intentos de inicio de sesión desde este dispositivo. Intenta de nuevo en unos minutos.' },
 });
 
-// Lista publica (sin datos sensibles) para la pantalla de "elige tu usuario".
-// empresa (slug) es requerido para no mezclar cuentas de CityPhone y Aurea
-// en la misma lista — 'dueño' aparece en ambas sin importar el filtro,
-// porque puede operar cualquiera de las dos.
-router.get('/usuarios', async (req, res) => {
+// Lista de personal por rol (la usa la app para elegir tecnico, por ejemplo). Ya NO es publica: antes se podia pedir sin iniciar
+// sesion y regalaba el id y el nombre de cada persona, incluido el Dueño. empresa (slug) es requerido para no mezclar cuentas de
+// CityPhone y Aurea en la misma lista — 'dueño' aparece en ambas sin importar el filtro, porque puede operar cualquiera de las dos.
+router.get('/usuarios', requireAuth, async (req, res) => {
   const { rol, empresa, sucursal_id } = req.query;
   if (!rol || !ROLES_VALIDOS.includes(rol)) {
     return res.status(400).json({ error: 'rol inválido o faltante.' });
@@ -66,7 +64,7 @@ router.get('/usuarios', async (req, res) => {
 });
 
 // Respuesta de un inicio de sesion correcto (igual para el login por correo y por PIN).
-function responderSesion(res, usuario) {
+function responderSesion(res, usuario, { debeCambiarPassword = false } = {}) {
   const token = signSession(usuario);
   res.json({
     token,
@@ -84,6 +82,9 @@ function responderSesion(res, usuario) {
       // empresa debe arrancar la app la próxima vez, en cualquier
       // dispositivo. Si nunca ha elegido una, cae en 'cityphone'.
       empresa_preferida_slug: usuario.empresa_preferida_slug ?? 'cityphone',
+      // La contraseña con la que entro es corta (el PIN de 4 digitos que se dejo como contraseña mientras duro la transicion):
+      // la app obliga a cambiarla antes de seguir.
+      debe_cambiar_password: debeCambiarPassword,
     },
   });
 }
@@ -143,61 +144,14 @@ async function loginConCorreo(req, res) {
   }
 
   await pool.query('UPDATE usuarios SET intentos_fallidos = 0, bloqueado_hasta = NULL WHERE id = $1', [usuario.id]);
-  responderSesion(res, usuario);
+  responderSesion(res, usuario, { debeCambiarPassword: !isValidPassword(password) });
 }
 
+// Unico acceso: correo y contraseña. (El login por PIN de 4 digitos se quito: era adivinable y la lista de usuarios regalaba a
+// quien atacar.)
 router.post('/login', loginLimiter, async (req, res) => {
-  if (req.body?.correo !== undefined) return loginConCorreo(req, res);
-  const { usuario_id, pin, sucursal_dispositivo } = req.body ?? {};
-  if (!usuario_id || !pin) {
-    return res.status(400).json({ error: 'usuario_id y pin son requeridos.' });
-  }
-  if (sucursal_dispositivo !== undefined && sucursal_dispositivo !== null && !UUID_RE.test(sucursal_dispositivo)) {
-    return res.status(400).json({ error: 'sucursal_dispositivo inválido.' });
-  }
-
-  const { rows } = await pool.query(
-    `SELECT u.*, s.nombre AS sucursal_nombre,
-            e.slug AS empresa_slug, e.nombre AS empresa_nombre,
-            ep.slug AS empresa_preferida_slug
-     FROM usuarios u
-     LEFT JOIN sucursales s ON s.id = u.sucursal_id
-     LEFT JOIN empresas e ON e.id = u.empresa_id
-     LEFT JOIN empresas ep ON ep.id = u.empresa_preferida_id
-     WHERE u.id = $1 AND u.activo = true`,
-    [usuario_id]
-  );
-  const usuario = rows[0];
-  if (!usuario) return res.status(404).json({ error: 'Usuario no encontrado.' });
-
-  // Antes del PIN, para que no cuente como intento fallido ni deje probar PINs.
-  if (sucursal_dispositivo && !puedeEntrarEnSucursal(usuario, sucursal_dispositivo)) {
-    return res.status(403).json({ error: 'Este usuario es de otra sucursal y no puede iniciar sesión en este equipo.' });
-  }
-
-  if (usuario.bloqueado_hasta && new Date(usuario.bloqueado_hasta) > new Date()) {
-    const segundos = Math.ceil((new Date(usuario.bloqueado_hasta) - new Date()) / 1000);
-    return res.status(423).json({ error: `Cuenta bloqueada. Intenta de nuevo en ${segundos}s.`, locked: true });
-  }
-
-  const pinOk = verifyPin(pin, usuario.pin_hash);
-
-  if (!pinOk) {
-    const intentos = usuario.intentos_fallidos + 1;
-    const bloqueado = intentos >= MAX_INTENTOS;
-    await pool.query(
-      `UPDATE usuarios SET intentos_fallidos = $1, bloqueado_hasta = $2 WHERE id = $3`,
-      [bloqueado ? 0 : intentos, bloqueado ? new Date(Date.now() + BLOQUEO_MS) : null, usuario.id]
-    );
-    if (bloqueado) {
-      return res.status(423).json({ error: `Demasiados intentos. Cuenta bloqueada ${BLOQUEO_MS / 60000} min.`, locked: true });
-    }
-    return res.status(401).json({ error: `PIN incorrecto (${intentos}/${MAX_INTENTOS} intentos).`, intentos });
-  }
-
-  await pool.query('UPDATE usuarios SET intentos_fallidos = 0, bloqueado_hasta = NULL WHERE id = $1', [usuario.id]);
-
-  responderSesion(res, usuario);
+  if (req.body?.correo === undefined) return res.status(400).json({ error: 'Escribe tu correo y tu contraseña.' });
+  return loginConCorreo(req, res);
 });
 
 // Cambiar la contraseña propia. Al cambiarla, el PIN (que era la contraseña por el momento) deja de servir:

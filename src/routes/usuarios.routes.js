@@ -1,7 +1,6 @@
 const express = require('express');
 const { pool } = require('../db');
 const { requireAuth, requireRole } = require('../middleware/auth');
-const { isValidPin, hashPin } = require('../utils/pin');
 const { isValidPassword, MENSAJE_PASSWORD, hashPassword, hashInservible, normalizarCorreo, esCorreoValido } = require('../utils/password');
 
 const router = express.Router();
@@ -35,25 +34,18 @@ router.get('/', async (req, res) => {
 });
 
 router.post('/', async (req, res) => {
-  const { nombre, telefono, email, rol, sucursal_id, empresa_id, pin, password } = req.body ?? {};
+  const { nombre, telefono, email, rol, sucursal_id, empresa_id, password } = req.body ?? {};
 
   if (!nombre?.trim()) return res.status(400).json({ error: 'El nombre es requerido.' });
   if (!ROLES_VALIDOS.includes(rol)) return res.status(400).json({ error: 'Rol inválido.' });
 
-  // Credencial: la cuenta entra con CORREO Y CONTRASEÑA. (Una version anterior de la app manda solo un PIN de 4
-  // digitos: se acepta mientras dure la transicion y queda como contraseña.)
+  // Credencial: la cuenta entra con CORREO Y CONTRASEÑA (ya no hay PIN de 4 digitos). pin_hash sigue siendo obligatorio en
+  // la tabla: se llena con un valor que nadie conoce.
   const correo = email ? normalizarCorreo(email) : null;
-  if (correo && !esCorreoValido(correo)) return res.status(400).json({ error: 'El correo no es válido.' });
-  let credencial;
-  if (password !== undefined) {
-    if (!correo) return res.status(400).json({ error: 'El correo es requerido.' });
-    if (!isValidPassword(password)) return res.status(400).json({ error: MENSAJE_PASSWORD });
-    credencial = { password_hash: hashPassword(password), pin_hash: hashInservible() };
-  } else {
-    if (!isValidPin(pin)) return res.status(400).json({ error: 'La contraseña es requerida.' });
-    const h = hashPin(pin);
-    credencial = { password_hash: h, pin_hash: h };
-  }
+  if (!correo) return res.status(400).json({ error: 'El correo es requerido: es con el que inicia sesión.' });
+  if (!esCorreoValido(correo)) return res.status(400).json({ error: 'El correo no es válido.' });
+  if (!isValidPassword(password)) return res.status(400).json({ error: MENSAJE_PASSWORD });
+  const credencial = { password_hash: hashPassword(password), pin_hash: hashInservible() };
 
   // Asignar acceso de Dueño o Admin (osea, a una empresa completa) es
   // decisión exclusiva del Dueño — un Admin normal no puede crear otro
@@ -69,6 +61,10 @@ router.post('/', async (req, res) => {
 
   if (rol !== 'dueño' && !empresa_id) {
     return res.status(400).json({ error: 'La empresa es requerida.' });
+  }
+  // Un Supervisor solo da de alta gente de SU empresa (el Dueño, de cualquiera).
+  if (req.usuario.rol !== 'dueño' && empresa_id !== req.usuario.empresa_id) {
+    return res.status(403).json({ error: 'Solo puedes dar de alta usuarios de tu propia empresa.' });
   }
 
   let empresaSlug = null;
@@ -101,18 +97,55 @@ router.post('/', async (req, res) => {
   }
 });
 
+// Quien puede modificar la cuenta de quien. El Dueño puede con todas. Un Supervisor solo con las de SU empresa que no sean de Dueño
+// ni de otro Supervisor (la misma regla que el cambio de contraseña, ver puedeGestionarCredenciales), y no puede cambiarle la
+// empresa a nadie. Con su propia cuenta solo cambia nombre, telefono y correo: ni su rol, ni su sucursal, ni su estado. Devuelve
+// { status, mensaje } si no se puede, o null. Solo cuentan los cambios reales (la pantalla manda todos los campos, iguales o no).
+function errorAlModificarUsuario(quien, objetivo, { rol, sucursal_id: sucursal, empresa_id: empresa, activo }) {
+  const cambia = (nuevo, actual) => nuevo !== undefined && (nuevo ?? null) !== (actual ?? null);
+  if (quien.rol === 'dueño') {
+    if (quien.sub === objetivo.id && cambia(activo, objetivo.activo) && activo === false) {
+      return { status: 400, mensaje: 'No puedes desactivar tu propia cuenta.' };
+    }
+    return null;
+  }
+  if (quien.sub === objetivo.id) {
+    if (cambia(rol, objetivo.rol) || cambia(sucursal, objetivo.sucursal_id) || cambia(empresa, objetivo.empresa_id) || cambia(activo, objetivo.activo)) {
+      return { status: 403, mensaje: 'No puedes cambiar tu propio rol, sucursal ni estado: pídeselo al Administrador.' };
+    }
+    return null;
+  }
+  if (!puedeGestionarCredenciales(quien, objetivo)) {
+    return { status: 403, mensaje: 'No puedes modificar esta cuenta.' };
+  }
+  if (cambia(empresa, objetivo.empresa_id)) {
+    return { status: 403, mensaje: 'Solo el Administrador puede cambiar a un usuario de empresa.' };
+  }
+  return null;
+}
+
 router.patch('/:id', async (req, res) => {
   const { nombre, telefono, email, rol, sucursal_id, empresa_id, activo } = req.body ?? {};
   if (rol && !ROLES_VALIDOS.includes(rol)) return res.status(400).json({ error: 'Rol inválido.' });
-  if (rol && (rol === 'dueño' || rol === 'admin') && req.usuario.rol !== 'dueño') {
+
+  const actual = (await pool.query('SELECT id, rol, sucursal_id, empresa_id, activo FROM usuarios WHERE id = $1', [req.params.id])).rows[0];
+  if (!actual) return res.status(404).json({ error: 'Usuario no encontrado.' });
+  // Asignar un rol solo cuenta cuando cambia (la pantalla manda el rol de siempre al editar otros datos, y un Supervisor no podia
+  // guardar ni su propia ficha porque la creia una asignacion de Admin).
+  const cambiaRol = !!rol && rol !== actual.rol;
+  if (cambiaRol && (rol === 'dueño' || rol === 'admin') && req.usuario.rol !== 'dueño') {
     return res.status(403).json({ error: 'Solo el Dueño puede asignar Dueño o Admin.' });
   }
-  if (rol && ROLES_DEL_TALLER.includes(rol) && req.usuario.rol !== 'dueño') {
+  if (cambiaRol && ROLES_DEL_TALLER.includes(rol) && req.usuario.rol !== 'dueño') {
     return res.status(403).json({ error: 'Solo el Dueño puede asignar cuentas del taller.' });
   }
-
-  const actual = (await pool.query('SELECT rol, sucursal_id FROM usuarios WHERE id = $1', [req.params.id])).rows[0];
-  if (!actual) return res.status(404).json({ error: 'Usuario no encontrado.' });
+  const errorDeAcceso = errorAlModificarUsuario(req.usuario, actual, { rol, sucursal_id, empresa_id, activo });
+  if (errorDeAcceso) return res.status(errorDeAcceso.status).json({ error: errorDeAcceso.mensaje });
+  // Nunca se queda el sistema sin Administrador activo: ni desactivando ni cambiando de rol al ultimo.
+  if (actual.rol === 'dueño' && actual.activo && (activo === false || (rol && rol !== 'dueño'))) {
+    const otros = (await pool.query(`SELECT count(*)::int AS n FROM usuarios WHERE rol = 'dueño' AND activo = true AND id <> $1`, [actual.id])).rows[0].n;
+    if (otros === 0) return res.status(409).json({ error: 'No puedes desactivar ni cambiar de rol al único Administrador.' });
+  }
   const rolFinal = rol ?? actual.rol;
   // El personal del taller nunca lleva sucursal (aunque llegue una en la peticion).
   const sucursalFinal = ROLES_DEL_TALLER.includes(rolFinal) ? null : sucursal_id;
@@ -180,24 +213,6 @@ router.post('/:id/password', async (req, res) => {
   await pool.query(
     `UPDATE usuarios SET password_hash = $1, pin_hash = $2, intentos_fallidos = 0, bloqueado_hasta = NULL WHERE id = $3`,
     [hashPassword(password), hashInservible(), req.params.id]
-  );
-  res.json({ ok: true });
-});
-
-// Version anterior de la app: restablecer el PIN. Mientras el PIN y la contraseña sean lo mismo, se cambian juntos;
-// si ya tiene una contraseña propia, esta no se toca.
-router.post('/:id/pin', async (req, res) => {
-  const { pin } = req.body ?? {};
-  if (!isValidPin(pin)) return res.status(400).json({ error: 'El PIN debe ser de 4 dígitos.' });
-  if (!(await objetivoDeCredencial(req, res))) return;
-
-  await pool.query(
-    `UPDATE usuarios
-     SET pin_hash = $1,
-         password_hash = CASE WHEN password_hash IS NULL OR password_hash = pin_hash THEN $1 ELSE password_hash END,
-         intentos_fallidos = 0, bloqueado_hasta = NULL
-     WHERE id = $2`,
-    [hashPin(pin), req.params.id]
   );
   res.json({ ok: true });
 });
