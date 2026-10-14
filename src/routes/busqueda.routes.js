@@ -56,13 +56,16 @@ router.get('/', async (req, res) => {
     ),
     !alcance.sinAcceso
       ? pool.query(
-          `SELECT r.id, r.folio, r.estado, c.nombre AS cliente_nombre
+          `SELECT r.id, r.folio, r.estado, CASE WHEN $5::boolean THEN NULL ELSE c.nombre END AS cliente_nombre,
+                  concat_ws(' ', r.equipo_marca, r.equipo_modelo) AS equipo, r.imei_equipo
            FROM reparaciones r JOIN clientes c ON c.id = r.cliente_id
-           WHERE ($1::uuid IS NULL OR r.sucursal_id = $1::uuid) AND (r.folio ILIKE $2 OR c.nombre ILIKE $2)
+           WHERE ($1::uuid IS NULL OR r.sucursal_id = $1::uuid)
+             AND (r.folio ILIKE $2 OR ($5::boolean IS NOT TRUE AND c.nombre ILIKE $2)
+                  OR ($5::boolean IS TRUE AND (r.imei_equipo ILIKE $2 OR r.equipo_marca ILIKE $2 OR r.equipo_modelo ILIKE $2)))
              AND ($3::uuid IS NULL OR r.tecnico_id = $3::uuid)
              AND ($4::uuid IS NULL OR r.sucursal_id = $4::uuid)${sqlAlcance(alcance)}
            ORDER BY r.created_at DESC LIMIT 5`,
-          [sucursal_id || null, like, alcance.tecnicoId ?? null, alcance.sucursalId ?? null]
+          [sucursal_id || null, like, alcance.tecnicoId ?? null, alcance.sucursalId ?? null, esPersonalTaller(rol)]
         )
       : Promise.resolve({ rows: [] }),
   ]);

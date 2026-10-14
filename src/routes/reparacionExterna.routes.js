@@ -2,6 +2,7 @@ const express = require('express');
 const { pool } = require('../db');
 const { verificarSecreto } = require('../middleware/webhookSecret');
 const { cancelarPorRechazo } = require('../utils/flujoReparacion');
+const { sqlFechaEstado } = require('../utils/fechaEstimada');
 
 const router = express.Router();
 
@@ -64,7 +65,7 @@ const centavos = (n) => Math.round(Number(n) * 100);
 async function consultarReparaciones(db, { folio, telefono10 }) {
   const { rows } = await db.query(
     `SELECT r.id, r.folio, r.estado, r.ubicacion, r.equipo_marca, r.equipo_modelo, r.problema_reportado,
-            r.created_at, r.fecha_estimada_entrega, r.total, r.nota_para_cliente, s.nombre AS sucursal_nombre,
+            r.created_at, r.fecha_estimada_entrega, ${sqlFechaEstado('r')} AS fecha_estado, r.total, r.nota_para_cliente, s.nombre AS sucursal_nombre,
             (r.cotizacion_rechazada_at IS NOT NULL AND r.cotizacion_rechazada_monto = r.total) AS rechazo_vigente,
             ((r.fecha_estimada_entrega AT TIME ZONE 'UTC')::date - (now() AT TIME ZONE 'America/Mexico_City')::date) AS dias_restantes
      FROM reparaciones r
@@ -103,6 +104,9 @@ async function consultarReparaciones(db, { folio, telefono10 }) {
     falla_reportada: r.problema_reportado,
     fecha_ingreso: r.created_at,
     fecha_estimada_entrega: r.fecha_estimada_entrega,
+    // 'sin_fecha' | 'estimada' | 'confirmada' (el cliente autorizo con esta fecha) | 'cambiada' (la fecha cambio despues de que el cliente
+    // autorizo: hay que avisarle). El agente solo debe decir "confirmada" cuando sea 'confirmada'.
+    fecha_estimada_estado: r.fecha_estado,
     dias_restantes: ESTADOS_CON_TIEMPO_RESTANTE.has(estadoParaCliente(r)) && r.dias_restantes != null ? Number(r.dias_restantes) : null,
     costo_autorizado: ESTADOS_CON_COSTO_AUTORIZADO.has(estadoParaCliente(r)) ? Number(r.total) : null,
     requiere_autorizacion: r.estado === 'esperando_autorizacion',
@@ -208,7 +212,7 @@ router.post('/autorizar', verificarSecreto, async (req, res) => {
           aviso = `La cotización cambió: ahora es de ${dinero(total)}. Vuelve a confirmarla con el cliente.`;
         } else {
           await client.query(
-            `UPDATE reparaciones SET estado = 'reparacion', cotizacion_rechazada_at = NULL, cotizacion_rechazada_monto = NULL WHERE id = $1`,
+            `UPDATE reparaciones SET estado = 'reparacion', fecha_estimada_confirmada = fecha_estimada_entrega, cotizacion_rechazada_at = NULL, cotizacion_rechazada_monto = NULL WHERE id = $1`,
             [r.id]
           );
           await client.query(

@@ -7,6 +7,7 @@ const { obtenerConfiguracionTicket } = require('../utils/configuracionTicket');
 const { registrarMovimientoRefaccion } = require('../utils/movimientosRefacciones');
 const { precioDePieza } = require('../utils/precioPiezas');
 const { urlDeNuestroBucket } = require('../utils/almacenamiento');
+const { sqlFechaEstado } = require('../utils/fechaEstimada');
 const { avisarCliente, mensajeCotizacion, mensajeReparado, mensajeListoEnTienda, datosCotizacion, datosReparado, datosListoEnTienda } = require('../utils/notificarReparacion');
 const { ESTADOS_ANTES_DE_REPARAR, devolverPiezas, cancelarPorRechazo, dinero } = require('../utils/flujoReparacion');
 
@@ -116,6 +117,9 @@ router.get('/', async (req, res) => {
   const { estado, tecnico_id, sucursal_id, q, desde, hasta, ubicacion, abiertas } = req.query;
   const alcance = alcanceReparaciones(req.usuario);
   if (alcance.sinAcceso) return res.json([]);
+  // El taller (tecnico y Supervisor del taller) no ve quien es el cliente: ni su nombre ni su telefono. Tampoco puede buscar por nombre de cliente (seria
+  // adivinarlo): busca por folio, IMEI, marca o modelo.
+  const sinCliente = esPersonalTaller(req.usuario.rol);
   // ubicacion: una o varias separadas por coma; abiertas=true: sin las entregadas ni las canceladas cuyo equipo ya se devolvio
   // (un cancelado sigue "abierto" mientras el equipo no se le devuelva al cliente).
   const ubicaciones = ubicacion ? String(ubicacion).split(',').map((u) => u.trim()).filter((u) => UBICACIONES_VALIDAS.includes(u)) : null;
@@ -135,7 +139,9 @@ router.get('/', async (req, res) => {
      WHERE ($1::text IS NULL OR r.estado::text = $1)
        AND ($2::uuid IS NULL OR r.tecnico_id = $2::uuid)
        AND ($3::uuid IS NULL OR r.sucursal_id = $3::uuid)
-       AND ($4::text IS NULL OR r.folio ILIKE '%' || $4 || '%' OR c.nombre ILIKE '%' || $4 || '%' OR r.imei_equipo ILIKE '%' || $4 || '%')
+       AND ($4::text IS NULL OR r.folio ILIKE '%' || $4 || '%' OR r.imei_equipo ILIKE '%' || $4 || '%'
+            OR ($11::boolean IS NOT TRUE AND c.nombre ILIKE '%' || $4 || '%')
+            OR ($11::boolean IS TRUE AND (r.equipo_marca ILIKE '%' || $4 || '%' OR r.equipo_modelo ILIKE '%' || $4 || '%')))
        AND ($5::timestamptz IS NULL OR r.created_at >= $5::timestamptz)
        AND ($6::timestamptz IS NULL OR r.created_at < $6::timestamptz)
        AND ($7::uuid IS NULL OR r.tecnico_id = $7::uuid)
@@ -145,10 +151,10 @@ router.get('/', async (req, res) => {
      ORDER BY r.created_at DESC`,
     [
       estado || null, tecnico_id || null, sucursal_id || null, q || null, desde ? inicioDiaUTC(desde) : null, hasta ? finDiaUTCExclusivo(hasta) : null,
-      alcance.tecnicoId ?? null, alcance.sucursalId ?? null, ubicaciones && ubicaciones.length ? ubicaciones : null, abiertas === 'true',
+      alcance.tecnicoId ?? null, alcance.sucursalId ?? null, ubicaciones && ubicaciones.length ? ubicaciones : null, abiertas === 'true', sinCliente,
     ]
   );
-  res.json(rows);
+  res.json(sinCliente ? rows.map((r) => ({ ...r, cliente_nombre: null })) : rows);
 });
 
 router.get('/:id', async (req, res) => {
@@ -158,7 +164,7 @@ router.get('/:id', async (req, res) => {
             r.equipo_marca, r.equipo_modelo, r.imei_equipo, r.equipo_contrasena, r.equipo_enciende, r.problema_reportado, r.diagnostico,
             r.estado, r.prioridad, r.tecnico_id, t.nombre AS tecnico_nombre,
             r.costo_mano_obra, r.costo_refacciones, r.total, r.garantia_dias, r.monto_pagado,
-            r.fecha_estimada_entrega, r.nota_para_cliente, r.checklist_revision, r.cotizacion_aproximada, r.observaciones_recepcion,
+            r.fecha_estimada_entrega, r.fecha_estimada_confirmada, ${sqlFechaEstado('r')} AS fecha_estado, r.nota_para_cliente, r.checklist_revision, r.cotizacion_aproximada, r.observaciones_recepcion,
             r.cotizacion_rechazada_at, r.cotizacion_rechazada_monto,
             (r.estado = 'esperando_autorizacion' AND r.cotizacion_rechazada_at IS NOT NULL AND r.cotizacion_rechazada_monto = r.total) AS cotizacion_rechazada,
             r.origen_reparacion, r.producto_id, prod.nombre AS producto_nombre, prod.activo AS producto_activo, r.unidad_imei_id, r.created_at, r.updated_at,
@@ -230,9 +236,10 @@ router.get('/:id', async (req, res) => {
   // comprobante sin necesitar ese permiso — mismo patron que POST /ventas.
   const configTicket = await obtenerConfiguracionTicket();
 
-  // El taller no trata con clientes ni con dinero: sin telefonos ni cobros (los avisos y el cobro los
-  // hace la sucursal que recibio el equipo).
+  // El taller no trata con clientes ni con dinero: sin nombre ni telefonos del cliente, y sin cobros (los avisos y el cobro los
+  // hace la sucursal que recibio el equipo). Ve el equipo y su IMEI.
   if (esPersonalTaller(req.usuario.rol)) {
+    reparacion.cliente_nombre = null;
     reparacion.cliente_telefono = null;
     reparacion.cliente_telefono_adicional = null;
   }
@@ -628,7 +635,11 @@ router.post('/:id/respuesta-cotizacion', requireRole('admin', 'vendedor'), async
     if (!r) throw falla(404, 'Reparación no encontrada.');
     if (r.estado !== 'esperando_autorizacion') throw falla(409, 'Este folio no está esperando la respuesta del cliente.');
     if (autoriza) {
-      await client.query(`UPDATE reparaciones SET estado = 'reparacion', cotizacion_rechazada_at = NULL, cotizacion_rechazada_monto = NULL WHERE id = $1`, [r.id]);
+      // fecha_estimada_confirmada = lo que el cliente acepto: la fecha estimada de este momento (ver utils/fechaEstimada.js).
+      await client.query(
+        `UPDATE reparaciones SET estado = 'reparacion', fecha_estimada_confirmada = fecha_estimada_entrega, cotizacion_rechazada_at = NULL, cotizacion_rechazada_monto = NULL WHERE id = $1`,
+        [r.id]
+      );
       await client.query(
         `INSERT INTO reparacion_historial (reparacion_id, estado, nota, usuario_id) VALUES ($1, 'reparacion', $2, $3)`,
         [r.id, `El cliente autorizó la cotización de ${dinero(r.total)}.`, req.usuario.sub]

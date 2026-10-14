@@ -563,6 +563,9 @@ CREATE TABLE reparaciones (
   monto_pagado       numeric(12,2) NOT NULL DEFAULT 0,
   garantia_dias      integer NOT NULL DEFAULT 0,
   fecha_estimada_entrega  timestamptz,
+  -- Copia de fecha_estimada_entrega al autorizar el cliente la cotizacion (lo que el cliente acepto). Si la fecha cambia despues deja de
+  -- coincidir y la app avisa. Ver utils/fechaEstimada.js y migracion_fecha_estimada_confirmada.sql.
+  fecha_estimada_confirmada timestamptz,
   -- Texto que el agente/asesor puede leerle al cliente tal cual (ej. "ya se
   -- reemplazo la pantalla, en pruebas finales") — separado de "diagnostico"
   -- porque ese es lenguaje tecnico interno del tecnico, no algo para el

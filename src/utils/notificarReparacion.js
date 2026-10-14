@@ -1,4 +1,5 @@
 const { llamarWebhookN8n } = require('./n8n');
+const { fechaLarga } = require('./fechaEstimada');
 
 // Avisos al cliente por cada fase de una reparacion (cotizacion, reparada, lista en tienda). Reusan el webhook de
 // notificaciones de n8n que ya existe (N8N_WEBHOOK_NOTIFICAR_CLIENTE, ver CityPhone_Referencia_n8n_Endpoints_y_Webhooks.txt B6): el
@@ -24,6 +25,7 @@ function mensajeCotizacion(r) {
   return (
     `Cotización de la reparación de ${nombreEquipo(r)} (folio ${r.folio}): ${dinero(r.total)}.`
     + (diagnostico ? ` Diagnóstico: ${diagnostico}.` : '')
+    + (r.fecha_estimada_entrega ? ` Fecha estimada de entrega: ${fechaLarga(r.fecha_estimada_entrega)}.` : '')
     + ' Pide al cliente que responda SÍ para autorizar la reparación o NO para cancelarla.'
   );
 }
@@ -59,7 +61,12 @@ function datosBase(r, tipoAviso) {
     },
   };
 }
-const datosCotizacion = (r) => ({ ...datosBase(r, 'cotizacion'), diagnostico: r.diagnostico?.trim() || null, responder: 'SI o NO' });
+const datosCotizacion = (r) => ({
+  ...datosBase(r, 'cotizacion'),
+  diagnostico: r.diagnostico?.trim() || null,
+  fecha_estimada_entrega: r.fecha_estimada_entrega ? new Date(r.fecha_estimada_entrega).toISOString().slice(0, 10) : null,
+  responder: 'SI o NO',
+});
 const datosReparado = (r) => datosBase(r, 'reparado');
 const datosListoEnTienda = (r) => datosBase(r, 'listo_en_tienda');
 
@@ -71,7 +78,7 @@ const datosListoEnTienda = (r) => datosBase(r, 'listo_en_tienda');
 //   omitido   la reparacion no tiene cliente (equipo propio): no hay a quien avisar.
 async function avisarCliente(pool, { reparacionId, tipo, construirMensaje, construirDatos, usuarioId }) {
   const { rows } = await pool.query(
-    `SELECT r.id, r.folio, r.sucursal_id, r.equipo_marca, r.equipo_modelo, r.diagnostico, r.total, r.monto_pagado, r.cliente_id,
+    `SELECT r.id, r.folio, r.sucursal_id, r.equipo_marca, r.equipo_modelo, r.diagnostico, r.total, r.monto_pagado, r.cliente_id, r.fecha_estimada_entrega,
             c.nombre AS cliente_nombre, c.telefono AS cliente_telefono, s.nombre AS sucursal_nombre,
             s.direccion AS sucursal_direccion, s.telefono AS sucursal_telefono, s.horario AS sucursal_horario
      FROM reparaciones r
