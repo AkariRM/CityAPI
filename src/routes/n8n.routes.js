@@ -2,6 +2,7 @@ const express = require('express');
 const { requireAuth, requireRole } = require('../middleware/auth');
 const { llamarWebhookN8n } = require('../utils/n8n');
 const { subirBufferABucket, detectarTipoReal } = require('../utils/almacenamiento');
+const trabajosRecurso = require('../utils/trabajosRecurso');
 
 const router = express.Router();
 router.use(requireAuth);
@@ -147,83 +148,130 @@ function extraerRecurso(valor) {
 // n8n guardando archivos en disco (modo "filesystem") no pone el base64 en el JSON sino una referencia interna ("filesystem-v2"): no es la imagen.
 const REFERENCIA_INTERNA_N8N = /(^|base64,)\s*filesystem(-v\d+)?\s*$/i;
 
-router.post('/cm/generar-recurso', requireRole('admin', 'community_manager'), async (req, res) => {
-  if (!validarEmpresa(req, res)) return;
+const falla = (statusCode, mensaje) => Object.assign(new Error(mensaje), { statusCode });
+
+// Pide el recurso a n8n y lo deja como una URL (lo que venga en base64 o binario se sube a nuestro almacenamiento). Devuelve { url } o lanza
+// un error con statusCode. Lo usan el endpoint de siempre (la peticion espera la imagen) y el de segundo plano (la app consulta despues).
+async function generarRecurso(payload) {
+  const inicio = Date.now();
+  const { data, buffer, contentType } = await llamarWebhookN8n(process.env.N8N_WEBHOOK_CM_GENERAR_RECURSO, payload, {
+    timeoutMs: TIMEOUT_GENERAR_RECURSO_MS,
+    reintentar: false,
+    etiqueta: 'generar-recurso',
+  });
+
+  // Una linea por generacion, salga bien o mal: cuanto tardo n8n y lo que contesto (resumido; nunca el base64 completo).
+  console.log(
+    `generar-recurso (${payload.red_social} ${payload.tipo_publicacion}): n8n respondió en ${((Date.now() - inicio) / 1000).toFixed(1)} s — `
+    + `${data ? resumirRespuesta(data) : describirCuerpo(buffer, contentType)}`
+  );
+
+  if (data?.status === 'error') throw falla(502, data.mensaje_error || 'La IA no pudo generar el recurso.');
+
+  let recurso = null;
+  if (data) {
+    recurso = extraerRecurso(data.recurso);
+  } else if (buffer?.length) {
+    // n8n no contesto JSON: o devolvio el archivo directo (binario) o un
+    // texto plano con la URL / el base64 de la imagen.
+    const tipoBinario = detectarTipoReal(buffer);
+    if (tipoBinario) return subirBufferABucket(buffer, tipoBinario);
+    const texto = buffer.toString('utf8').trim();
+    if (/^https?:\/\/\S+$/i.test(texto) || /^data:image\/\w+;base64,/.test(texto) || /^[A-Za-z0-9+/=\r\n]{200,}$/.test(texto)) {
+      recurso = texto;
+    }
+  }
+  if (!recurso) {
+    const detalle = data ? resumirRespuesta(data) : describirCuerpo(buffer, contentType);
+    console.error('generar-recurso: respuesta inesperada de n8n:', detalle);
+    throw falla(502, `La IA no devolvió un recurso. Respuesta de n8n: ${detalle}`);
+  }
+
+  if (/^https?:\/\//i.test(recurso)) return { url: recurso };
+
+  if (REFERENCIA_INTERNA_N8N.test(recurso)) {
+    console.error('generar-recurso: n8n devolvió una referencia interna de archivo en vez de la imagen:', resumirRespuesta(data ?? recurso));
+    throw falla(
+      502,
+      'La IA generó la imagen, pero n8n no la entregó: devolvió una referencia interna ("filesystem-v2") en vez del archivo. '
+        + 'Avísale a TRAI: en el workflow hay que convertir el binario a base64 (Move Binary Data) o responder con el archivo directo.'
+    );
+  }
+
+  const match = /^data:(image\/\w+);base64,(.+)$/.exec(recurso);
+  const imagen = Buffer.from(match ? match[2] : recurso, 'base64');
+  // El tipo se toma de los bytes de la imagen, no de lo que diga el texto: asi nunca se sube basura declarada como PNG.
+  const mimeType = detectarTipoReal(imagen);
+  if (!mimeType) throw falla(502, `El recurso que devolvió la IA no es una imagen válida: ${resumirRespuesta(recurso)}`);
+
+  return subirBufferABucket(imagen, mimeType);
+}
+
+function validarRecurso(req, res) {
+  if (!validarEmpresa(req, res)) return false;
   const faltan = faltantes(req.body, ['red_social', 'tipo_publicacion', 'hook']);
-  if (faltan.length) return res.status(400).json({ error: `Faltan campos: ${faltan.join(', ')}.` });
+  if (faltan.length) {
+    res.status(400).json({ error: `Faltan campos: ${faltan.join(', ')}.` });
+    return false;
+  }
+  return true;
+}
 
+function payloadRecurso(req) {
+  return {
+    ...contexto(req),
+    empresa: req.body.empresa,
+    red_social: req.body.red_social,
+    tipo_publicacion: req.body.tipo_publicacion,
+    hook: req.body.hook,
+    descripcion: req.body.descripcion ?? '',
+    cta: req.body.cta ?? '',
+    productos: Array.isArray(req.body.productos) ? req.body.productos : [],
+  };
+}
+
+const responderError = (res, err) => res.status(err.statusCode ?? 500).json({ error: err.statusCode ? err.message : 'Error interno del servidor.' });
+
+// La peticion espera hasta que n8n termine (hasta TIMEOUT_GENERAR_RECURSO_MS). Se conserva para las versiones de la app que todavia no usan
+// el modo en segundo plano.
+router.post('/cm/generar-recurso', requireRole('admin', 'community_manager'), async (req, res) => {
+  if (!validarRecurso(req, res)) return;
   try {
-    const inicio = Date.now();
-    const { data, buffer, contentType } = await llamarWebhookN8n(
-      process.env.N8N_WEBHOOK_CM_GENERAR_RECURSO,
-      {
-        ...contexto(req),
-        empresa: req.body.empresa,
-        red_social: req.body.red_social,
-        tipo_publicacion: req.body.tipo_publicacion,
-        hook: req.body.hook,
-        descripcion: req.body.descripcion ?? '',
-        cta: req.body.cta ?? '',
-        productos: Array.isArray(req.body.productos) ? req.body.productos : [],
-      },
-      { timeoutMs: TIMEOUT_GENERAR_RECURSO_MS, reintentar: false, etiqueta: 'generar-recurso' }
-    );
-
-    // Una linea por generacion, salga bien o mal: cuanto tardo n8n y lo que contesto (resumido; nunca el base64 completo).
-    console.log(
-      `generar-recurso (${req.body.red_social} ${req.body.tipo_publicacion}): n8n respondió en ${((Date.now() - inicio) / 1000).toFixed(1)} s — `
-      + `${data ? resumirRespuesta(data) : describirCuerpo(buffer, contentType)}`
-    );
-
-    if (data?.status === 'error') {
-      return res.status(502).json({ error: data.mensaje_error || 'La IA no pudo generar el recurso.' });
-    }
-
-    let recurso = null;
-    if (data) {
-      recurso = extraerRecurso(data.recurso);
-    } else if (buffer?.length) {
-      // n8n no contesto JSON: o devolvio el archivo directo (binario) o un
-      // texto plano con la URL / el base64 de la imagen.
-      const tipoBinario = detectarTipoReal(buffer);
-      if (tipoBinario) {
-        const { url } = await subirBufferABucket(buffer, tipoBinario);
-        return res.json({ url });
-      }
-      const texto = buffer.toString('utf8').trim();
-      if (/^https?:\/\/\S+$/i.test(texto) || /^data:image\/\w+;base64,/.test(texto) || /^[A-Za-z0-9+/=\r\n]{200,}$/.test(texto)) {
-        recurso = texto;
-      }
-    }
-    if (!recurso) {
-      const detalle = data ? resumirRespuesta(data) : describirCuerpo(buffer, contentType);
-      console.error('generar-recurso: respuesta inesperada de n8n:', detalle);
-      return res.status(502).json({ error: `La IA no devolvió un recurso. Respuesta de n8n: ${detalle}` });
-    }
-
-    if (/^https?:\/\//i.test(recurso)) return res.json({ url: recurso });
-
-    if (REFERENCIA_INTERNA_N8N.test(recurso)) {
-      console.error('generar-recurso: n8n devolvió una referencia interna de archivo en vez de la imagen:', resumirRespuesta(data ?? recurso));
-      return res.status(502).json({
-        error: 'La IA generó la imagen, pero n8n no la entregó: devolvió una referencia interna ("filesystem-v2") en vez del archivo. '
-          + 'Avísale a TRAI: en el workflow hay que convertir el binario a base64 (Move Binary Data) o responder con el archivo directo.',
-      });
-    }
-
-    const match = /^data:(image\/\w+);base64,(.+)$/.exec(recurso);
-    const imagen = Buffer.from(match ? match[2] : recurso, 'base64');
-    // El tipo se toma de los bytes de la imagen, no de lo que diga el texto: asi nunca se sube basura declarada como PNG.
-    const mimeType = detectarTipoReal(imagen);
-    if (!mimeType) {
-      return res.status(502).json({ error: `El recurso que devolvió la IA no es una imagen válida: ${resumirRespuesta(recurso)}` });
-    }
-
-    const { url } = await subirBufferABucket(imagen, mimeType);
+    const { url } = await generarRecurso(payloadRecurso(req));
     res.json({ url });
   } catch (err) {
-    res.status(err.statusCode ?? 500).json({ error: err.statusCode ? err.message : 'Error interno del servidor.' });
+    responderError(res, err);
   }
+});
+
+// En segundo plano: contesta 202 al instante con un id y la generacion sigue en el servidor. La app consulta el estado (GET) cada pocos
+// segundos, y por eso la persona puede cambiar de paso o cerrar la pantalla sin perder la imagen. Ver utils/trabajosRecurso.js.
+router.post('/cm/generar-recurso/trabajos', requireRole('admin', 'community_manager'), async (req, res) => {
+  if (!validarRecurso(req, res)) return;
+  let trabajo;
+  try {
+    trabajo = trabajosRecurso.crear(req.usuario.sub);
+  } catch (err) {
+    return responderError(res, err);
+  }
+  generarRecurso(payloadRecurso(req))
+    .then(({ url }) => trabajosRecurso.terminar(trabajo.id, url))
+    .catch((err) => {
+      if (!err.statusCode) console.error('generar-recurso (segundo plano): error inesperado:', err);
+      trabajosRecurso.fallar(trabajo.id, err.statusCode ? err.message : 'Error interno del servidor.');
+    });
+  res.status(202).json(trabajosRecurso.vista(trabajo));
+});
+
+router.get('/cm/generar-recurso/trabajos/:id', requireRole('admin', 'community_manager'), (req, res) => {
+  const trabajo = trabajosRecurso.obtener(req.params.id, req.usuario.sub);
+  if (!trabajo) return res.status(404).json({ error: 'No encontramos esa generación. Puede que el servidor se haya reiniciado: genera de nuevo.' });
+  res.json(trabajosRecurso.vista(trabajo));
+});
+
+router.delete('/cm/generar-recurso/trabajos/:id', requireRole('admin', 'community_manager'), (req, res) => {
+  if (!trabajosRecurso.cancelar(req.params.id, req.usuario.sub)) return res.status(404).json({ error: 'No encontramos esa generación.' });
+  res.json({ ok: true });
 });
 
 // 4 — Publicacion de contenido con IA (enrutado por red social)
