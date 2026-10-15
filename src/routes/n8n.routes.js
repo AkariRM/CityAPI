@@ -45,7 +45,7 @@ function contexto(req) {
 
 async function relayarWebhook(res, url, payload) {
   try {
-    const { data } = await llamarWebhookN8n(url, payload);
+    const { data } = await llamarWebhookN8n(url, payload, { etiqueta: res.req?.path });
     res.json(data ?? { status: 'ok' });
   } catch (err) {
     res.status(err.statusCode ?? 500).json({ error: err.statusCode ? err.message : 'Error interno del servidor.' });
@@ -93,8 +93,9 @@ router.post('/cm/generar-contenido', requireRole('admin', 'community_manager'), 
 // "recurso" se normaliza siempre a una URL: si ya viene como URL se deja tal
 // cual (puede ser un video), si viene como imagen en base64 se sube a nuestro
 // bucket igual que mejorar-imagen. Tarda mas que el resto y es caro de
-// repetir, asi que timeout ampliado y sin reintento automatico.
-const TIMEOUT_GENERAR_RECURSO_MS = 90000;
+// repetir, asi que timeout ampliado y sin reintento automatico. Se puede ajustar sin tocar el codigo con N8N_TIMEOUT_GENERAR_RECURSO_MS
+// (milisegundos) en Render; por defecto 180 s, porque con 90 s llegaron a quedarse cortas generaciones que n8n si termino.
+const TIMEOUT_GENERAR_RECURSO_MS = Number(process.env.N8N_TIMEOUT_GENERAR_RECURSO_MS) || 180000;
 
 // Resumen corto de lo que contesto n8n (strings largos, base64 incluido, se
 // recortan) para ver la respuesta real en vez de adivinar su forma.
@@ -130,6 +131,22 @@ function primeraUrl(valor) {
   return null;
 }
 
+// El "recurso" puede venir como texto (URL o base64) o como objeto con metadatos de la imagen, por ejemplo
+// { tipo, imagen_base64, descripcion_visual, prompt_usado, dimensiones } (lo que manda hoy el workflow de TRAI).
+function extraerRecurso(valor) {
+  if (typeof valor === 'string') return valor;
+  if (valor && typeof valor === 'object') {
+    for (const clave of ['url', 'imagen_url', 'imagen_base64', 'imagen', 'base64']) {
+      if (typeof valor[clave] === 'string' && valor[clave].trim()) return valor[clave].trim();
+    }
+    return primeraUrl(valor);
+  }
+  return null;
+}
+
+// n8n guardando archivos en disco (modo "filesystem") no pone el base64 en el JSON sino una referencia interna ("filesystem-v2"): no es la imagen.
+const REFERENCIA_INTERNA_N8N = /(^|base64,)\s*filesystem(-v\d+)?\s*$/i;
+
 router.post('/cm/generar-recurso', requireRole('admin', 'community_manager'), async (req, res) => {
   if (!validarEmpresa(req, res)) return;
   const faltan = faltantes(req.body, ['red_social', 'tipo_publicacion', 'hook']);
@@ -148,7 +165,7 @@ router.post('/cm/generar-recurso', requireRole('admin', 'community_manager'), as
         cta: req.body.cta ?? '',
         productos: Array.isArray(req.body.productos) ? req.body.productos : [],
       },
-      { timeoutMs: TIMEOUT_GENERAR_RECURSO_MS, reintentar: false }
+      { timeoutMs: TIMEOUT_GENERAR_RECURSO_MS, reintentar: false, etiqueta: 'generar-recurso' }
     );
 
     if (data?.status === 'error') {
@@ -157,7 +174,7 @@ router.post('/cm/generar-recurso', requireRole('admin', 'community_manager'), as
 
     let recurso = null;
     if (data) {
-      recurso = typeof data.recurso === 'string' ? data.recurso : primeraUrl(data.recurso);
+      recurso = extraerRecurso(data.recurso);
     } else if (buffer?.length) {
       // n8n no contesto JSON: o devolvio el archivo directo (binario) o un
       // texto plano con la URL / el base64 de la imagen.
@@ -179,9 +196,18 @@ router.post('/cm/generar-recurso', requireRole('admin', 'community_manager'), as
 
     if (/^https?:\/\//i.test(recurso)) return res.json({ url: recurso });
 
+    if (REFERENCIA_INTERNA_N8N.test(recurso)) {
+      console.error('generar-recurso: n8n devolvió una referencia interna de archivo en vez de la imagen:', resumirRespuesta(data ?? recurso));
+      return res.status(502).json({
+        error: 'La IA generó la imagen, pero n8n no la entregó: devolvió una referencia interna ("filesystem-v2") en vez del archivo. '
+          + 'Avísale a TRAI: en el workflow hay que convertir el binario a base64 (Move Binary Data) o responder con el archivo directo.',
+      });
+    }
+
     const match = /^data:(image\/\w+);base64,(.+)$/.exec(recurso);
     const imagen = Buffer.from(match ? match[2] : recurso, 'base64');
-    const mimeType = match?.[1] ?? detectarTipoReal(imagen);
+    // El tipo se toma de los bytes de la imagen, no de lo que diga el texto: asi nunca se sube basura declarada como PNG.
+    const mimeType = detectarTipoReal(imagen);
     if (!mimeType) {
       return res.status(502).json({ error: `El recurso que devolvió la IA no es una imagen válida: ${resumirRespuesta(recurso)}` });
     }

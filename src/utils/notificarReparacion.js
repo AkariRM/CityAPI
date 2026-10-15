@@ -115,7 +115,7 @@ async function avisarCliente(pool, { reparacionId, tipo, construirMensaje, const
           // Lo mismo que dice el mensaje, ya separado, para que el agente lo use sin tener que leer el texto.
           datos: construirDatos ? construirDatos(r) : undefined,
         },
-        { timeoutMs: 20000, reintentar: false }
+        { timeoutMs: 20000, reintentar: false, etiqueta: 'aviso-reparacion' }
       );
       if (data?.status === 'ok') estado = 'enviado';
       else if (data?.status === 'error') error = data.mensaje_error || 'n8n no pudo enviar el aviso.';

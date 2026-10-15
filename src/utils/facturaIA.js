@@ -52,7 +52,7 @@ async function leerFacturaConIA({ archivo, buffer, nombre, usuarioId }) {
         nombre_archivo: typeof nombre === 'string' ? nombre.slice(0, 120) : null,
         archivo_base64: buffer.toString('base64'),
       },
-      { timeoutMs: 120000, reintentar: false }
+      { timeoutMs: 120000, reintentar: false, etiqueta: 'leer-factura' }
     );
   } catch (err) {
     throw falla(err.statusCode ?? 502, err.message || 'No se pudo contactar el servicio de IA.');

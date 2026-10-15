@@ -39,7 +39,7 @@ async function enviarRespuesta(pool, p, usuarioId) {
             referencia: p.referencia ?? null,
           },
         },
-        { timeoutMs: 20000, reintentar: false }
+        { timeoutMs: 20000, reintentar: false, etiqueta: 'respuesta-pendiente' }
       );
       if (data?.status === 'ok') estado = 'enviado';
       else if (data?.status === 'error') error = data.mensaje_error || 'n8n no pudo enviar la respuesta.';

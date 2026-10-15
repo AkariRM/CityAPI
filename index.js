@@ -84,10 +84,13 @@ app.use(cors(allowedOrigins ? { origin: allowedOrigins } : undefined));
 
 // Limite general de peticiones por IP, como defensa basica contra abuso o
 // scripts descontrolados. El limite de /auth/login es aparte y mas estricto.
+// Todos los equipos de una sucursal salen por la MISMA IP, y las pantallas que se actualizan solas (Panel, Recepcion / Entrega, folio abierto)
+// piden datos cada 15-30 s: con 600 por 15 min (40 por minuto) varios equipos abiertos a la vez podian agotarlo (1000 = unas 66 por minuto). Se puede ajustar con
+// RATE_LIMIT_GENERAL (peticiones por 15 minutos) en Render.
 app.use(
   rateLimit({
     windowMs: 15 * 60 * 1000,
-    limit: 600,
+    limit: Number(process.env.RATE_LIMIT_GENERAL) || 1000,
     standardHeaders: true,
     legacyHeaders: false,
   })

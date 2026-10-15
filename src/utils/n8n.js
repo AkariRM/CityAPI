@@ -35,6 +35,10 @@ async function intentarLlamada(url, payload, timeoutMs) {
     }
     if (!res.ok) throw new Error(data?.mensaje ?? data?.mensaje_error ?? `n8n respondió ${res.status}`);
     return { status: res.status, data, contentType, buffer };
+  } catch (err) {
+    // Se cortó la espera: n8n pudo haber terminado despues (en n8n se ve la ejecucion con su resultado), pero CityPhone ya no esta esperando.
+    if (controller.signal.aborted) throw Object.assign(new Error(`n8n no contestó en ${Math.round(timeoutMs / 1000)} s (se cortó la espera)`), { esTimeout: true });
+    throw err;
   } finally {
     clearTimeout(timeout);
   }
@@ -43,13 +47,15 @@ async function intentarLlamada(url, payload, timeoutMs) {
 // timeoutMs / reintentar son opcionales: generar un recurso grafico tarda
 // mas que el resto y es caro de repetir, asi que ahi se amplia el timeout y
 // se apaga el reintento automatico (ver /cm/generar-recurso).
-async function llamarWebhookN8n(url, payload, { timeoutMs = TIMEOUT_MS, reintentar = true } = {}) {
+// etiqueta: nombre corto de la automatizacion, solo para que el log diga cual fue la que fallo.
+async function llamarWebhookN8n(url, payload, { timeoutMs = TIMEOUT_MS, reintentar = true, etiqueta = 'sin nombre' } = {}) {
   if (!url) throw Object.assign(new Error('Automatización no configurada en el servidor.'), { statusCode: 500 });
+  const motivo = (err) => (err.esTimeout ? err.message : err);
   try {
     return await intentarLlamada(url, payload, timeoutMs);
   } catch (primerError) {
     if (!reintentar) {
-      console.error('n8n webhook falló (sin reintento):', primerError);
+      console.error(`n8n [${etiqueta}] falló (sin reintento):`, motivo(primerError));
       throw Object.assign(new Error('No se pudo contactar el servicio de IA. Intenta de nuevo.'), { statusCode: 502 });
     }
     // Un reintento antes de rendirse — los workflows de IA a veces truenan
@@ -58,7 +64,7 @@ async function llamarWebhookN8n(url, payload, { timeoutMs = TIMEOUT_MS, reintent
     try {
       return await intentarLlamada(url, payload, timeoutMs);
     } catch (err) {
-      console.error('n8n webhook falló tras reintento:', err);
+      console.error(`n8n [${etiqueta}] falló tras reintento:`, motivo(err));
       throw Object.assign(new Error('No se pudo contactar el servicio de IA. Intenta de nuevo.'), { statusCode: 502 });
     }
   }
