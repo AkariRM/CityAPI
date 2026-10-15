@@ -153,6 +153,7 @@ router.post('/cm/generar-recurso', requireRole('admin', 'community_manager'), as
   if (faltan.length) return res.status(400).json({ error: `Faltan campos: ${faltan.join(', ')}.` });
 
   try {
+    const inicio = Date.now();
     const { data, buffer, contentType } = await llamarWebhookN8n(
       process.env.N8N_WEBHOOK_CM_GENERAR_RECURSO,
       {
@@ -166,6 +167,12 @@ router.post('/cm/generar-recurso', requireRole('admin', 'community_manager'), as
         productos: Array.isArray(req.body.productos) ? req.body.productos : [],
       },
       { timeoutMs: TIMEOUT_GENERAR_RECURSO_MS, reintentar: false, etiqueta: 'generar-recurso' }
+    );
+
+    // Una linea por generacion, salga bien o mal: cuanto tardo n8n y lo que contesto (resumido; nunca el base64 completo).
+    console.log(
+      `generar-recurso (${req.body.red_social} ${req.body.tipo_publicacion}): n8n respondió en ${((Date.now() - inicio) / 1000).toFixed(1)} s — `
+      + `${data ? resumirRespuesta(data) : describirCuerpo(buffer, contentType)}`
     );
 
     if (data?.status === 'error') {
